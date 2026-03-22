@@ -28,7 +28,6 @@
 | 🐧 | **Multi-OS** | CentOS Stream 9/10, RHEL 9/10, Rocky, AlmaLinux, Ubuntu 22.04/24.04, Debian 12 |
 | 🏗️ | **Multi-Arch** | x86_64 and ARM64 (aarch64) fully supported |
 | 📡 | **Latest Software** | Auto-fetches the latest stable versions from official sources and GitHub |
-| 🎨 | **Beautiful UX** | Interactive menus with emoji indicators, colored output, step-by-step guidance |
 | 🛡️ | **Production Safe** | Config backups, dry-run mode, container detection, idempotent operations |
 | 🧩 | **Modular** | Run individual modules or the full setup wizard with opt-in control |
 
