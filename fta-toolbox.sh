@@ -1749,55 +1749,142 @@ module_full_setup() {
     msg_header "🚀 Full Auto Setup Wizard"
 
     msg "  This wizard will guide you through a complete server setup."
-    msg "  You can choose to skip any step along the way."
+    msg "  First, choose which components to include."
     msg ""
 
-    if ! confirm "Start full setup wizard?"; then
-        msg_info "Wizard cancelled"
-        return 0
-    fi
+    # -------------------------------------------------------------------------
+    # Phase 1: Collect user selections (always ask, even with --yes)
+    # -------------------------------------------------------------------------
+    # Core modules — included by default (Y)
+    local do_update="Y" do_network="Y" do_modern="Y"
+    local do_security="Y" do_tuning="Y" do_timezone="Y"
+    # Optional modules — NOT included by default (N)
+    local do_nodejs="N" do_docker="N" do_portainer="N" do_swap="N"
 
-    msg ""
-    msg "  ${BOLD}${CYAN}━━━ Step 1/9: System Update ━━━${RESET}"
-    module_update_system
-    msg ""
-
-    msg "  ${BOLD}${CYAN}━━━ Step 2/9: Network Tools ━━━${RESET}"
-    module_network_tools
-    msg ""
-
-    msg "  ${BOLD}${CYAN}━━━ Step 3/9: Modern CLI Tools ━━━${RESET}"
-    module_modern_tools
-    msg ""
-
-    msg "  ${BOLD}${CYAN}━━━ Step 4/9: Node.js ━━━${RESET}"
-    module_nodejs
-    msg ""
-
-    msg "  ${BOLD}${CYAN}━━━ Step 5/9: Docker Engine ━━━${RESET}"
-    module_docker
-    msg ""
-
-    msg "  ${BOLD}${CYAN}━━━ Step 6/9: Portainer & Watchtower ━━━${RESET}"
-    if command_exists docker; then
-        module_portainer
+    if [[ "$AUTO_YES" == true ]]; then
+        # In --yes mode, run core modules automatically but still skip optional ones.
+        # User must pass individual module names for optional services.
+        msg "  ${BOLD}Core modules${RESET} (auto-included with --yes):"
+        msg "    ✅ System Update & Essentials"
+        msg "    ✅ Network Diagnostic Tools"
+        msg "    ✅ Modern CLI Tools"
+        msg "    ✅ Security Hardening"
+        msg "    ✅ Performance Tuning"
+        msg "    ✅ Timezone & NTP"
+        msg ""
+        msg "  ${BOLD}Optional modules${RESET} (skipped with --yes, run individually):"
+        msg "    ⏭  Node.js         →  ./fta-toolbox.sh --yes nodejs"
+        msg "    ⏭  Docker          →  ./fta-toolbox.sh --yes docker"
+        msg "    ⏭  Portainer       →  ./fta-toolbox.sh --yes portainer"
+        msg "    ⏭  Swap            →  ./fta-toolbox.sh --yes swap"
+        msg ""
     else
-        msg_info "Docker not installed — skipping Portainer/Watchtower"
+        msg "  ${BOLD}${CYAN}── Core Modules (recommended) ──${RESET}"
+        msg ""
+        confirm "  🔄 Update system & install essentials?" && do_update="Y" || do_update="N"
+        confirm "  🌐 Install network diagnostic tools?" && do_network="Y" || do_network="N"
+        confirm "  🛠️  Install modern CLI tools?" && do_modern="Y" || do_modern="N"
+        confirm "  🔒 Apply security hardening?" && do_security="Y" || do_security="N"
+        confirm "  ⚡ Apply performance tuning?" && do_tuning="Y" || do_tuning="N"
+        confirm "  🕐 Configure timezone & NTP?" && do_timezone="Y" || do_timezone="N"
+
+        msg ""
+        msg "  ${BOLD}${CYAN}── Optional Services ──${RESET}"
+        msg ""
+        confirm "  💚 Install Node.js (LTS)?" "N" && do_nodejs="Y" || do_nodejs="N"
+        confirm "  🐳 Install Docker Engine?" "N" && do_docker="Y" || do_docker="N"
+        if [[ "$do_docker" == "Y" ]] || command_exists docker; then
+            confirm "  🏗️  Deploy Portainer & Watchtower?" "N" && do_portainer="Y" || do_portainer="N"
+        fi
+        confirm "  💾 Configure swap?" "N" && do_swap="Y" || do_swap="N"
+
+        # Show summary
+        msg ""
+        msg "  ${BOLD}${CYAN}── Setup Plan ──${RESET}"
+        msg ""
+        [[ "$do_update" == "Y" ]]    && msg "    ✅ System Update"     || msg "    ⏭  System Update"
+        [[ "$do_network" == "Y" ]]   && msg "    ✅ Network Tools"     || msg "    ⏭  Network Tools"
+        [[ "$do_modern" == "Y" ]]    && msg "    ✅ Modern CLI Tools"  || msg "    ⏭  Modern CLI Tools"
+        [[ "$do_nodejs" == "Y" ]]    && msg "    ✅ Node.js"           || msg "    ⏭  Node.js"
+        [[ "$do_docker" == "Y" ]]    && msg "    ✅ Docker"            || msg "    ⏭  Docker"
+        [[ "$do_portainer" == "Y" ]] && msg "    ✅ Portainer"         || msg "    ⏭  Portainer"
+        [[ "$do_security" == "Y" ]]  && msg "    ✅ Security"          || msg "    ⏭  Security"
+        [[ "$do_tuning" == "Y" ]]    && msg "    ✅ Performance"       || msg "    ⏭  Performance"
+        [[ "$do_timezone" == "Y" ]]  && msg "    ✅ Timezone"          || msg "    ⏭  Timezone"
+        [[ "$do_swap" == "Y" ]]      && msg "    ✅ Swap"              || msg "    ⏭  Swap"
+        msg ""
+
+        if ! confirm "Proceed with this plan?"; then
+            msg_info "Wizard cancelled"
+            return 0
+        fi
     fi
-    msg ""
 
-    msg "  ${BOLD}${CYAN}━━━ Step 7/9: Security Hardening ━━━${RESET}"
-    module_security
-    msg ""
+    # -------------------------------------------------------------------------
+    # Phase 2: Execute selected modules
+    # -------------------------------------------------------------------------
+    # Temporarily enable auto-yes so individual module confirms don't re-ask
+    local saved_auto_yes="$AUTO_YES"
+    AUTO_YES=true
 
-    msg "  ${BOLD}${CYAN}━━━ Step 8/9: Performance Tuning ━━━${RESET}"
-    module_performance
-    msg ""
+    local step=0 total=0
+    [[ "$do_update" == "Y" ]]    && ((total++))
+    [[ "$do_network" == "Y" ]]   && ((total++))
+    [[ "$do_modern" == "Y" ]]    && ((total++))
+    [[ "$do_nodejs" == "Y" ]]    && ((total++))
+    [[ "$do_docker" == "Y" ]]    && ((total++))
+    [[ "$do_portainer" == "Y" ]] && ((total++))
+    [[ "$do_security" == "Y" ]]  && ((total++))
+    [[ "$do_tuning" == "Y" ]]    && ((total++))
+    [[ "$do_timezone" == "Y" ]]  && ((total++))
+    [[ "$do_swap" == "Y" ]]      && ((total++))
 
-    msg "  ${BOLD}${CYAN}━━━ Step 9/9: Timezone & Swap ━━━${RESET}"
-    module_timezone
-    msg ""
-    module_swap
+    if [[ "$do_update" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: System Update ━━━${RESET}"
+        module_update_system
+    fi
+    if [[ "$do_network" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Network Tools ━━━${RESET}"
+        module_network_tools
+    fi
+    if [[ "$do_modern" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Modern CLI Tools ━━━${RESET}"
+        module_modern_tools
+    fi
+    if [[ "$do_nodejs" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Node.js ━━━${RESET}"
+        module_nodejs
+    fi
+    if [[ "$do_docker" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Docker Engine ━━━${RESET}"
+        module_docker
+    fi
+    if [[ "$do_portainer" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Portainer & Watchtower ━━━${RESET}"
+        if command_exists docker; then
+            module_portainer
+        else
+            msg_info "Docker not installed — skipping Portainer/Watchtower"
+        fi
+    fi
+    if [[ "$do_security" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Security Hardening ━━━${RESET}"
+        module_security
+    fi
+    if [[ "$do_tuning" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Performance Tuning ━━━${RESET}"
+        module_performance
+    fi
+    if [[ "$do_timezone" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Timezone & NTP ━━━${RESET}"
+        module_timezone
+    fi
+    if [[ "$do_swap" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Swap ━━━${RESET}"
+        module_swap
+    fi
+
+    AUTO_YES="$saved_auto_yes"
 
     msg ""
     msg_header "🎉 Setup Complete!"
