@@ -35,6 +35,7 @@ BACKUP_DIR=""
 TMP_DIR=""
 AUTO_YES=false
 DRY_RUN=false
+WIZARD_ACTIVE=false
 
 # Architecture detection
 ARCH=$(uname -m)
@@ -134,7 +135,7 @@ msg_banner() {
 confirm() {
     local prompt=$1
     local default=${2:-Y}
-    [[ "$AUTO_YES" == true ]] && return 0
+    [[ "$AUTO_YES" == true || "$WIZARD_ACTIVE" == true ]] && return 0
     local yn
     if [[ "$default" == "Y" ]]; then
         read -rp "  $prompt [Y/n]: " yn
@@ -328,7 +329,7 @@ spinner() {
 }
 
 press_enter() {
-    [[ "$AUTO_YES" == true ]] && return
+    [[ "$AUTO_YES" == true || "$WIZARD_ACTIVE" == true ]] && return
     echo ""
     read -rp "  Press Enter to continue..."
 }
@@ -475,9 +476,9 @@ show_system_info() {
                 btm)     ver=$(btm --version 2>/dev/null | awk '{print $2}') ;;
                 *)       ver=$(${tool} --version 2>/dev/null | head -1 | grep -oP '[\d]+\.[\d.]+' | head -1) ;;
             esac
-            printf "  ${GREEN}  ✓${RESET} %-12s %s\n" "$tool" "${DIM}${ver:-}${RESET}"
+            printf "  ${GREEN}  ✓${RESET} %-12s ${DIM}%s${RESET}\n" "$tool" "${ver:-}"
         else
-            printf "  ${DIM}  ○ %-12s not installed${RESET}\n" "$tool"
+            printf "  ${DIM}  ○${RESET} %-12s ${DIM}not installed${RESET}\n" "$tool"
         fi
     done
     msg ""
@@ -1032,30 +1033,33 @@ https://download.docker.com/linux/${OS_ID} ${codename} stable" \
 # SECTION 12: PORTAINER & WATCHTOWER
 # =============================================================================
 
-module_portainer() {
-    msg_header "🏗️  Portainer & Watchtower"
-
+_require_docker() {
     if ! command_exists docker; then
         msg_err "Docker is not installed — please install Docker first (option 6)"
         return 1
     fi
-
     if ! systemctl is-active docker &>/dev/null 2>&1 && ! docker info &>/dev/null 2>&1; then
         msg_err "Docker is not running"
         return 1
     fi
+    return 0
+}
 
-    if ! confirm "Deploy Portainer (Docker UI) and Watchtower (auto-updater)?"; then
+module_portainer() {
+    msg_header "🏗️  Portainer (Docker UI)"
+
+    _require_docker || return 1
+
+    if ! confirm "Deploy Portainer (Docker UI)?"; then
         msg_info "Skipped"
         return 0
     fi
 
     if [[ "$DRY_RUN" == true ]]; then
-        msg_info "[DRY-RUN] Would deploy Portainer and Watchtower containers"
+        msg_info "[DRY-RUN] Would deploy Portainer container"
         return 0
     fi
 
-    # --- Portainer ---
     local portainer_name="portainer"
     if docker ps -a --format '{{.Names}}' | grep -q "^${portainer_name}$"; then
         msg_warn "Portainer container already exists"
@@ -1078,20 +1082,37 @@ module_portainer() {
             local server_ip
             server_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
             msg_ok "Portainer deployed"
-            msg_info "🌐 Access UI: https://${server_ip:-localhost}:9443"
+            msg_info "Access UI: https://${server_ip:-localhost}:9443"
         else
             msg_err "Failed to start Portainer"
         fi
     fi
 
-    # --- Docker config for Watchtower ---
+    msg_done "Portainer setup complete"
+}
+
+module_watchtower() {
+    msg_header "👀 Watchtower (Auto-updater)"
+
+    _require_docker || return 1
+
+    if ! confirm "Deploy Watchtower (automatic container updates)?"; then
+        msg_info "Skipped"
+        return 0
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        msg_info "[DRY-RUN] Would deploy Watchtower container"
+        return 0
+    fi
+
+    # Ensure docker config exists for Watchtower
     local docker_config="/root/.docker/config.json"
     if [[ ! -f "$docker_config" ]]; then
         mkdir -p /root/.docker
         echo '{}' > "$docker_config"
     fi
 
-    # --- Watchtower ---
     local watchtower_name="watchtower"
     if docker ps -a --format '{{.Names}}' | grep -q "^${watchtower_name}$"; then
         msg_warn "Watchtower container already exists"
@@ -1117,7 +1138,7 @@ module_portainer() {
         fi
     fi
 
-    msg_done "Portainer & Watchtower setup complete"
+    msg_done "Watchtower setup complete"
 }
 
 # =============================================================================
@@ -1759,7 +1780,7 @@ module_full_setup() {
     local do_update="Y" do_network="Y" do_modern="Y"
     local do_security="Y" do_tuning="Y" do_timezone="Y"
     # Optional modules — NOT included by default (N)
-    local do_nodejs="N" do_docker="N" do_portainer="N" do_swap="N"
+    local do_nodejs="N" do_docker="N" do_portainer="N" do_watchtower="N" do_swap="N"
 
     if [[ "$AUTO_YES" == true ]]; then
         # In --yes mode, run core modules automatically but still skip optional ones.
@@ -1776,6 +1797,7 @@ module_full_setup() {
         msg "    ⏭  Node.js         →  ./fta-toolbox.sh --yes nodejs"
         msg "    ⏭  Docker          →  ./fta-toolbox.sh --yes docker"
         msg "    ⏭  Portainer       →  ./fta-toolbox.sh --yes portainer"
+        msg "    ⏭  Watchtower      →  ./fta-toolbox.sh --yes watchtower"
         msg "    ⏭  Swap            →  ./fta-toolbox.sh --yes swap"
         msg ""
     else
@@ -1794,7 +1816,8 @@ module_full_setup() {
         confirm "  💚 Install Node.js (LTS)?" "N" && do_nodejs="Y" || do_nodejs="N"
         confirm "  🐳 Install Docker Engine?" "N" && do_docker="Y" || do_docker="N"
         if [[ "$do_docker" == "Y" ]] || command_exists docker; then
-            confirm "  🏗️  Deploy Portainer & Watchtower?" "N" && do_portainer="Y" || do_portainer="N"
+            confirm "  🏗️  Deploy Portainer (Docker UI)?" "N" && do_portainer="Y" || do_portainer="N"
+            confirm "  👀 Deploy Watchtower (auto-updater)?" "N" && do_watchtower="Y" || do_watchtower="N"
         fi
         confirm "  💾 Configure swap?" "N" && do_swap="Y" || do_swap="N"
 
@@ -1806,9 +1829,10 @@ module_full_setup() {
         [[ "$do_network" == "Y" ]]   && msg "    ✅ Network Tools"     || msg "    ⏭  Network Tools"
         [[ "$do_modern" == "Y" ]]    && msg "    ✅ Modern CLI Tools"  || msg "    ⏭  Modern CLI Tools"
         [[ "$do_nodejs" == "Y" ]]    && msg "    ✅ Node.js"           || msg "    ⏭  Node.js"
-        [[ "$do_docker" == "Y" ]]    && msg "    ✅ Docker"            || msg "    ⏭  Docker"
-        [[ "$do_portainer" == "Y" ]] && msg "    ✅ Portainer"         || msg "    ⏭  Portainer"
-        [[ "$do_security" == "Y" ]]  && msg "    ✅ Security"          || msg "    ⏭  Security"
+        [[ "$do_docker" == "Y" ]]     && msg "    ✅ Docker"            || msg "    ⏭  Docker"
+        [[ "$do_portainer" == "Y" ]]  && msg "    ✅ Portainer"         || msg "    ⏭  Portainer"
+        [[ "$do_watchtower" == "Y" ]] && msg "    ✅ Watchtower"        || msg "    ⏭  Watchtower"
+        [[ "$do_security" == "Y" ]]   && msg "    ✅ Security"          || msg "    ⏭  Security"
         [[ "$do_tuning" == "Y" ]]    && msg "    ✅ Performance"       || msg "    ⏭  Performance"
         [[ "$do_timezone" == "Y" ]]  && msg "    ✅ Timezone"          || msg "    ⏭  Timezone"
         [[ "$do_swap" == "Y" ]]      && msg "    ✅ Swap"              || msg "    ⏭  Swap"
@@ -1823,18 +1847,20 @@ module_full_setup() {
     # -------------------------------------------------------------------------
     # Phase 2: Execute selected modules
     # -------------------------------------------------------------------------
-    # Temporarily enable auto-yes so individual module confirms don't re-ask
-    local saved_auto_yes="$AUTO_YES"
-    AUTO_YES=true
+    # Enable wizard mode so module entry-guard confirms are auto-accepted,
+    # but configuration prompts (timezone, node version, swap size) still appear.
+    local saved_wizard="$WIZARD_ACTIVE"
+    WIZARD_ACTIVE=true
 
     local step=0 total=0
     [[ "$do_update" == "Y" ]]    && ((total++))
     [[ "$do_network" == "Y" ]]   && ((total++))
     [[ "$do_modern" == "Y" ]]    && ((total++))
     [[ "$do_nodejs" == "Y" ]]    && ((total++))
-    [[ "$do_docker" == "Y" ]]    && ((total++))
-    [[ "$do_portainer" == "Y" ]] && ((total++))
-    [[ "$do_security" == "Y" ]]  && ((total++))
+    [[ "$do_docker" == "Y" ]]     && ((total++))
+    [[ "$do_portainer" == "Y" ]]  && ((total++))
+    [[ "$do_watchtower" == "Y" ]] && ((total++))
+    [[ "$do_security" == "Y" ]]   && ((total++))
     [[ "$do_tuning" == "Y" ]]    && ((total++))
     [[ "$do_timezone" == "Y" ]]  && ((total++))
     [[ "$do_swap" == "Y" ]]      && ((total++))
@@ -1860,11 +1886,19 @@ module_full_setup() {
         module_docker
     fi
     if [[ "$do_portainer" == "Y" ]]; then
-        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Portainer & Watchtower ━━━${RESET}"
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Portainer ━━━${RESET}"
         if command_exists docker; then
             module_portainer
         else
-            msg_info "Docker not installed — skipping Portainer/Watchtower"
+            msg_info "Docker not installed — skipping Portainer"
+        fi
+    fi
+    if [[ "$do_watchtower" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Watchtower ━━━${RESET}"
+        if command_exists docker; then
+            module_watchtower
+        else
+            msg_info "Docker not installed — skipping Watchtower"
         fi
     fi
     if [[ "$do_security" == "Y" ]]; then
@@ -1884,7 +1918,7 @@ module_full_setup() {
         module_swap
     fi
 
-    AUTO_YES="$saved_auto_yes"
+    WIZARD_ACTIVE="$saved_wizard"
 
     msg ""
     msg_header "🎉 Setup Complete!"
@@ -1960,11 +1994,12 @@ show_menu() {
     msg "    ${BOLD}4${RESET})  🛠️   Modern CLI Tools"
     msg "    ${BOLD}5${RESET})  💚  Node.js (LTS)"
     msg "    ${BOLD}6${RESET})  🐳  Docker Engine"
-    msg "    ${BOLD}7${RESET})  🏗️   Portainer & Watchtower"
-    msg "    ${BOLD}8${RESET})  🔒  Security Hardening"
-    msg "    ${BOLD}9${RESET})  ⚡  Performance Tuning"
-    msg "   ${BOLD}10${RESET})  🕐  Timezone & NTP"
-    msg "   ${BOLD}11${RESET})  💾  Swap Management"
+    msg "    ${BOLD}7${RESET})  🏗️   Portainer (Docker UI)"
+    msg "    ${BOLD}8${RESET})  👀  Watchtower (Auto-updater)"
+    msg "    ${BOLD}9${RESET})  🔒  Security Hardening"
+    msg "   ${BOLD}10${RESET})  ⚡  Performance Tuning"
+    msg "   ${BOLD}11${RESET})  🕐  Timezone & NTP"
+    msg "   ${BOLD}12${RESET})  💾  Swap Management"
     msg ""
     msg "    ${DIM}─────────────────────────────────────${RESET}"
     msg "   ${BOLD}88${RESET})  🚀  ${GREEN}Full Auto Setup${RESET}"
@@ -1983,10 +2018,11 @@ handle_choice() {
         5)  module_nodejs ;;
         6)  module_docker ;;
         7)  module_portainer ;;
-        8)  module_security ;;
-        9)  module_performance ;;
-        10) module_timezone ;;
-        11) module_swap ;;
+        8)  module_watchtower ;;
+        9)  module_security ;;
+        10) module_performance ;;
+        11) module_timezone ;;
+        12) module_swap ;;
         88) module_full_setup ;;
         99) self_update ;;
         0|q|Q|exit)
@@ -2035,7 +2071,8 @@ show_help() {
     modern           Install modern CLI tools
     nodejs           Install Node.js LTS
     docker           Install Docker Engine
-    portainer        Deploy Portainer & Watchtower
+    portainer        Deploy Portainer (Docker UI)
+    watchtower       Deploy Watchtower (auto-updater)
     security         Apply security hardening
     tuning           Apply performance tuning
     timezone         Configure timezone & NTP
@@ -2079,7 +2116,7 @@ main() {
                 DRY_RUN=true
                 shift
                 ;;
-            info|update|network|modern|nodejs|docker|portainer|security|tuning|timezone|swap|full)
+            info|update|network|modern|nodejs|docker|portainer|watchtower|security|tuning|timezone|swap|full)
                 module="$1"
                 shift
                 ;;
@@ -2122,8 +2159,9 @@ main() {
             modern)    module_modern_tools ;;
             nodejs)    module_nodejs ;;
             docker)    module_docker ;;
-            portainer) module_portainer ;;
-            security)  module_security ;;
+            portainer)   module_portainer ;;
+            watchtower)  module_watchtower ;;
+            security)    module_security ;;
             tuning)    module_performance ;;
             timezone)  module_timezone ;;
             swap)      module_swap ;;
