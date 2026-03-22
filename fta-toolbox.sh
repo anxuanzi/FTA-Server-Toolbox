@@ -23,7 +23,7 @@ set -uo pipefail
 # SECTION 1: CONSTANTS & CONFIGURATION
 # =============================================================================
 
-readonly TOOLBOX_VERSION="2.2.0"
+readonly TOOLBOX_VERSION="2.3.0"
 readonly TOOLBOX_NAME="FTA Server Toolbox"
 readonly LOG_FILE="/var/log/fta-toolbox.log"
 readonly CONFIG_DIR="/root/.fta-toolbox"
@@ -36,6 +36,14 @@ TMP_DIR=""
 AUTO_YES=false
 DRY_RUN=false
 WIZARD_ACTIVE=false
+
+# Wizard pre-collected configuration (set by full setup wizard, read by modules)
+WIZARD_CFG_TIMEZONE=""    # e.g., "America/New_York", "UTC"
+WIZARD_CFG_DNS1=""        # primary DNS server
+WIZARD_CFG_DNS2=""        # secondary DNS server
+WIZARD_CFG_NODE_VER=""    # e.g., "20", "22", "24"
+WIZARD_CFG_NODE_TOOLS=""  # "Y" or "N" — install yarn/pnpm
+WIZARD_CFG_SWAP_SIZE=""   # e.g., "2G", "4G"
 
 # Architecture detection
 ARCH=$(uname -m)
@@ -972,7 +980,9 @@ module_nodejs() {
     msg ""
 
     local node_version="22"
-    if [[ "$AUTO_YES" != true ]]; then
+    if [[ -n "$WIZARD_CFG_NODE_VER" ]]; then
+        node_version="$WIZARD_CFG_NODE_VER"
+    elif [[ "$AUTO_YES" != true ]]; then
         read -rp "  Select version [1]: " nv_choice
         case "${nv_choice:-1}" in
             2) node_version="20" ;;
@@ -1011,7 +1021,7 @@ module_nodejs() {
         msg_ok "npm $(npm --version) included"
 
         # Install useful global npm packages
-        if confirm "Install useful global npm tools (yarn, pnpm, npx)?"; then
+        if [[ "$WIZARD_CFG_NODE_TOOLS" == "Y" ]] || confirm "Install useful global npm tools (yarn, pnpm, npx)?"; then
             npm install -g yarn pnpm &>/dev/null
             msg_ok "yarn and pnpm installed globally"
         fi
@@ -1691,7 +1701,9 @@ module_timezone() {
     msg ""
 
     local target_tz=""
-    if [[ "$AUTO_YES" == true ]]; then
+    if [[ -n "$WIZARD_CFG_TIMEZONE" ]]; then
+        target_tz="$WIZARD_CFG_TIMEZONE"
+    elif [[ "$AUTO_YES" == true ]]; then
         target_tz="UTC"
     else
         read -rp "  Select [5]: " tz_choice
@@ -1808,7 +1820,9 @@ module_swap() {
     msg ""
 
     local swap_size="${recommended_gb}G"
-    if [[ "$AUTO_YES" != true ]]; then
+    if [[ -n "$WIZARD_CFG_SWAP_SIZE" ]]; then
+        swap_size="$WIZARD_CFG_SWAP_SIZE"
+    elif [[ "$AUTO_YES" != true ]]; then
         read -rp "  Enter swap size (e.g., 2G, 4G) [${recommended_gb}G]: " user_swap
         [[ -n "$user_swap" ]] && swap_size="$user_swap"
     fi
@@ -1902,7 +1916,10 @@ module_dns() {
     msg ""
 
     local dns1="" dns2=""
-    if [[ "$AUTO_YES" == true ]]; then
+    if [[ -n "$WIZARD_CFG_DNS1" ]]; then
+        dns1="$WIZARD_CFG_DNS1"
+        dns2="$WIZARD_CFG_DNS2"
+    elif [[ "$AUTO_YES" == true ]]; then
         # Default to Cloudflare in auto mode
         dns1="1.1.1.1"
         dns2="1.0.0.1"
@@ -2013,12 +2030,12 @@ module_dns() {
 module_full_setup() {
     msg_header "🚀 Full Auto Setup Wizard"
 
-    msg "  This wizard will guide you through a complete server setup."
-    msg "  First, choose which components to include."
+    msg "  This wizard asks all questions upfront, then runs the entire"
+    msg "  setup hands-free. No further prompts after you confirm the plan."
     msg ""
 
     # -------------------------------------------------------------------------
-    # Phase 1: Collect user selections (always ask, even with --yes)
+    # Phase 1: Select modules
     # -------------------------------------------------------------------------
     # Core modules — included by default (Y)
     local do_update="Y" do_network="Y" do_modern="Y"
@@ -2035,8 +2052,8 @@ module_full_setup() {
         msg "    ✅ Modern CLI Tools"
         msg "    ✅ Security Hardening"
         msg "    ✅ Performance Tuning"
-        msg "    ✅ Timezone & NTP"
-        msg "    ✅ DNS Configuration"
+        msg "    ✅ Timezone & NTP  (UTC)"
+        msg "    ✅ DNS Configuration  (Cloudflare)"
         msg ""
         msg "  ${BOLD}Optional modules${RESET} (skipped with --yes, run individually):"
         msg "    ⏭  Node.js         →  ./fta-toolbox.sh --yes nodejs"
@@ -2046,7 +2063,10 @@ module_full_setup() {
         msg "    ⏭  Swap            →  ./fta-toolbox.sh --yes swap"
         msg ""
     else
-        msg "  ${BOLD}${CYAN}── Core Modules (recommended) ──${RESET}"
+        msg "  ${BOLD}${CYAN}── Step 1: Select Modules ──${RESET}"
+        msg ""
+
+        msg "  ${BOLD}Core Modules (recommended):${RESET}"
         msg ""
         confirm "  🔄 Update system & install essentials?" && do_update="Y" || do_update="N"
         confirm "  🌐 Install network diagnostic tools?" && do_network="Y" || do_network="N"
@@ -2057,7 +2077,7 @@ module_full_setup() {
         confirm "  🌍 Configure DNS servers?" && do_dns="Y" || do_dns="N"
 
         msg ""
-        msg "  ${BOLD}${CYAN}── Optional Services ──${RESET}"
+        msg "  ${BOLD}Optional Services:${RESET}"
         msg ""
         confirm "  💚 Install Node.js (LTS)?" "N" && do_nodejs="Y" || do_nodejs="N"
         confirm "  🐳 Install Docker Engine?" "N" && do_docker="Y" || do_docker="N"
@@ -2067,22 +2087,111 @@ module_full_setup() {
         fi
         confirm "  💾 Configure swap?" "N" && do_swap="Y" || do_swap="N"
 
-        # Show summary
+        # ---------------------------------------------------------------------
+        # Phase 1b: Collect configuration for selected modules
+        # ---------------------------------------------------------------------
+        local has_config=false
+        [[ "$do_timezone" == "Y" || "$do_dns" == "Y" || "$do_nodejs" == "Y" || "$do_swap" == "Y" ]] && has_config=true
+
+        if [[ "$has_config" == true ]]; then
+            msg ""
+            msg "  ${BOLD}${CYAN}── Step 2: Configure Selected Modules ──${RESET}"
+        fi
+
+        # --- Timezone config ---
+        if [[ "$do_timezone" == "Y" ]]; then
+            msg ""
+            msg "  ${BOLD}🕐 Timezone:${RESET}"
+            msg "    ${CYAN}1${RESET}) America/New_York      ${CYAN}2${RESET}) America/Chicago"
+            msg "    ${CYAN}3${RESET}) America/Denver         ${CYAN}4${RESET}) America/Los_Angeles"
+            msg "    ${CYAN}5${RESET}) UTC                    ${CYAN}6${RESET}) Europe/London"
+            msg "    ${CYAN}7${RESET}) Europe/Berlin          ${CYAN}8${RESET}) Asia/Shanghai"
+            msg "    ${CYAN}9${RESET}) Asia/Tokyo             ${CYAN}0${RESET}) Custom"
+            read -rp "    Select [5]: " tz_choice
+            case "${tz_choice:-5}" in
+                1) WIZARD_CFG_TIMEZONE="America/New_York" ;;
+                2) WIZARD_CFG_TIMEZONE="America/Chicago" ;;
+                3) WIZARD_CFG_TIMEZONE="America/Denver" ;;
+                4) WIZARD_CFG_TIMEZONE="America/Los_Angeles" ;;
+                5) WIZARD_CFG_TIMEZONE="UTC" ;;
+                6) WIZARD_CFG_TIMEZONE="Europe/London" ;;
+                7) WIZARD_CFG_TIMEZONE="Europe/Berlin" ;;
+                8) WIZARD_CFG_TIMEZONE="Asia/Shanghai" ;;
+                9) WIZARD_CFG_TIMEZONE="Asia/Tokyo" ;;
+                0) read -rp "    Enter timezone (e.g., Asia/Tokyo): " WIZARD_CFG_TIMEZONE ;;
+                *) WIZARD_CFG_TIMEZONE="UTC" ;;
+            esac
+        fi
+
+        # --- DNS config ---
+        if [[ "$do_dns" == "Y" ]]; then
+            msg ""
+            msg "  ${BOLD}🌍 DNS Servers:${RESET}"
+            msg "    ${CYAN}1${RESET}) Cloudflare  (1.1.1.1)         ${CYAN}2${RESET}) Google  (8.8.8.8)"
+            msg "    ${CYAN}3${RESET}) OpenDNS  (208.67.222.222)     ${CYAN}4${RESET}) DNSPod  (119.29.29.29)"
+            msg "    ${CYAN}5${RESET}) DigitalOcean  (67.207.67.2)   ${CYAN}0${RESET}) Custom"
+            read -rp "    Select [1]: " dns_choice
+            case "${dns_choice:-1}" in
+                1) WIZARD_CFG_DNS1="1.1.1.1";        WIZARD_CFG_DNS2="1.0.0.1" ;;
+                2) WIZARD_CFG_DNS1="8.8.8.8";        WIZARD_CFG_DNS2="8.8.4.4" ;;
+                3) WIZARD_CFG_DNS1="208.67.222.222";  WIZARD_CFG_DNS2="208.67.220.220" ;;
+                4) WIZARD_CFG_DNS1="119.29.29.29";    WIZARD_CFG_DNS2="119.28.28.28" ;;
+                5) WIZARD_CFG_DNS1="67.207.67.2";     WIZARD_CFG_DNS2="67.207.67.3" ;;
+                0)
+                    read -rp "    Primary DNS: " WIZARD_CFG_DNS1
+                    read -rp "    Secondary DNS (optional): " WIZARD_CFG_DNS2
+                    ;;
+                *) WIZARD_CFG_DNS1="1.1.1.1"; WIZARD_CFG_DNS2="1.0.0.1" ;;
+            esac
+        fi
+
+        # --- Node.js config ---
+        if [[ "$do_nodejs" == "Y" ]]; then
+            msg ""
+            msg "  ${BOLD}💚 Node.js Version:${RESET}"
+            msg "    ${CYAN}1${RESET}) Node.js 22 LTS  ${GREEN}(Recommended)${RESET}"
+            msg "    ${CYAN}2${RESET}) Node.js 20 LTS"
+            msg "    ${CYAN}3${RESET}) Node.js 24 (Latest)"
+            read -rp "    Select [1]: " nv_choice
+            case "${nv_choice:-1}" in
+                2) WIZARD_CFG_NODE_VER="20" ;;
+                3) WIZARD_CFG_NODE_VER="24" ;;
+                *) WIZARD_CFG_NODE_VER="22" ;;
+            esac
+            confirm "    Install yarn & pnpm?" && WIZARD_CFG_NODE_TOOLS="Y" || WIZARD_CFG_NODE_TOOLS="N"
+        fi
+
+        # --- Swap config ---
+        if [[ "$do_swap" == "Y" ]]; then
+            msg ""
+            local ram_mb
+            ram_mb=$(free -m | awk '/^Mem:/{print $2}')
+            local rec_gb=2
+            [[ "$ram_mb" -le 2048 ]]  && rec_gb=2
+            [[ "$ram_mb" -gt 2048 ]]  && rec_gb=4
+            [[ "$ram_mb" -gt 8192 ]]  && rec_gb=8
+            [[ "$ram_mb" -gt 16384 ]] && rec_gb=8
+            msg "  ${BOLD}💾 Swap Size:${RESET}  (RAM: $(free -h | awk '/^Mem:/{print $2}'), recommended: ${rec_gb}G)"
+            read -rp "    Enter swap size [${rec_gb}G]: " user_swap
+            WIZARD_CFG_SWAP_SIZE="${user_swap:-${rec_gb}G}"
+        fi
+
+        # --- Summary ---
         msg ""
         msg "  ${BOLD}${CYAN}── Setup Plan ──${RESET}"
         msg ""
-        [[ "$do_update" == "Y" ]]    && msg "    ✅ System Update"     || msg "    ⏭  System Update"
-        [[ "$do_network" == "Y" ]]   && msg "    ✅ Network Tools"     || msg "    ⏭  Network Tools"
-        [[ "$do_modern" == "Y" ]]    && msg "    ✅ Modern CLI Tools"  || msg "    ⏭  Modern CLI Tools"
-        [[ "$do_nodejs" == "Y" ]]    && msg "    ✅ Node.js"           || msg "    ⏭  Node.js"
-        [[ "$do_docker" == "Y" ]]     && msg "    ✅ Docker"            || msg "    ⏭  Docker"
-        [[ "$do_portainer" == "Y" ]]  && msg "    ✅ Portainer"         || msg "    ⏭  Portainer"
-        [[ "$do_watchtower" == "Y" ]] && msg "    ✅ Watchtower"        || msg "    ⏭  Watchtower"
-        [[ "$do_security" == "Y" ]]   && msg "    ✅ Security"          || msg "    ⏭  Security"
-        [[ "$do_tuning" == "Y" ]]    && msg "    ✅ Performance"       || msg "    ⏭  Performance"
-        [[ "$do_timezone" == "Y" ]]  && msg "    ✅ Timezone"          || msg "    ⏭  Timezone"
-        [[ "$do_dns" == "Y" ]]       && msg "    ✅ DNS"               || msg "    ⏭  DNS"
-        [[ "$do_swap" == "Y" ]]      && msg "    ✅ Swap"              || msg "    ⏭  Swap"
+        [[ "$do_update" == "Y" ]]    && msg "    ✅ System Update"                                             || msg "    ⏭  System Update"
+        [[ "$do_network" == "Y" ]]   && msg "    ✅ Network Tools"                                             || msg "    ⏭  Network Tools"
+        [[ "$do_modern" == "Y" ]]    && msg "    ✅ Modern CLI Tools"                                          || msg "    ⏭  Modern CLI Tools"
+        [[ "$do_nodejs" == "Y" ]]    && msg "    ✅ Node.js ${WIZARD_CFG_NODE_VER} LTS"                        || msg "    ⏭  Node.js"
+        [[ "$do_docker" == "Y" ]]     && msg "    ✅ Docker"                                                    || msg "    ⏭  Docker"
+        [[ "$do_portainer" == "Y" ]]  && msg "    ✅ Portainer"                                                 || msg "    ⏭  Portainer"
+        [[ "$do_watchtower" == "Y" ]] && msg "    ✅ Watchtower"                                                || msg "    ⏭  Watchtower"
+        [[ "$do_security" == "Y" ]]   && msg "    ✅ Security"                                                  || msg "    ⏭  Security"
+        [[ "$do_tuning" == "Y" ]]    && msg "    ✅ Performance"                                               || msg "    ⏭  Performance"
+        [[ "$do_timezone" == "Y" ]]  && msg "    ✅ Timezone  → ${WIZARD_CFG_TIMEZONE}"                        || msg "    ⏭  Timezone"
+        [[ "$do_dns" == "Y" ]]       && msg "    ✅ DNS  → ${WIZARD_CFG_DNS1}${WIZARD_CFG_DNS2:+ / $WIZARD_CFG_DNS2}" || msg "    ⏭  DNS"
+        [[ "$do_swap" == "Y" ]]      && msg "    ✅ Swap  → ${WIZARD_CFG_SWAP_SIZE}"                           || msg "    ⏭  Swap"
         msg ""
 
         if ! confirm "Proceed with this plan?"; then
@@ -2092,10 +2201,8 @@ module_full_setup() {
     fi
 
     # -------------------------------------------------------------------------
-    # Phase 2: Execute selected modules
+    # Phase 2: Execute — fully automatic, no more prompts
     # -------------------------------------------------------------------------
-    # Enable wizard mode so module entry-guard confirms are auto-accepted,
-    # but configuration prompts (timezone, node version, swap size) still appear.
     local saved_wizard="$WIZARD_ACTIVE"
     WIZARD_ACTIVE=true
 
@@ -2171,6 +2278,10 @@ module_full_setup() {
     fi
 
     WIZARD_ACTIVE="$saved_wizard"
+
+    # Clear wizard config so standalone module runs are not affected
+    WIZARD_CFG_TIMEZONE="" WIZARD_CFG_DNS1="" WIZARD_CFG_DNS2=""
+    WIZARD_CFG_NODE_VER="" WIZARD_CFG_NODE_TOOLS="" WIZARD_CFG_SWAP_SIZE=""
 
     msg ""
     msg_header "🎉 Setup Complete!"
