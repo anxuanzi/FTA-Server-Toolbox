@@ -23,7 +23,7 @@ set -uo pipefail
 # SECTION 1: CONSTANTS & CONFIGURATION
 # =============================================================================
 
-readonly TOOLBOX_VERSION="2.3.0"
+readonly TOOLBOX_VERSION="2.3.1"
 readonly TOOLBOX_NAME="FTA Server Toolbox"
 readonly LOG_FILE="/var/log/fta-toolbox.log"
 readonly CONFIG_DIR="/root/.fta-toolbox"
@@ -525,6 +525,15 @@ show_system_info() {
         msg "  ${GREEN}✅${RESET} Perf Tuning     Applied"
     else
         msg "  ${DIM}○${RESET}  Perf Tuning     ${YELLOW}Not applied${RESET}"
+    fi
+
+    # Cloud-init network management
+    if command_exists cloud-init && [[ -d /etc/cloud/cloud.cfg.d ]]; then
+        if [[ -f /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg ]]; then
+            msg "  ${GREEN}✅${RESET} cloud-init net  Disabled (DNS safe)"
+        else
+            msg "  ${YELLOW}⚠️${RESET}  cloud-init net  Active (may reset DNS on reboot)"
+        fi
     fi
 
     # Docker
@@ -2018,6 +2027,28 @@ module_dns() {
         fi
     else
         msg_info "No dig/nslookup available — skipping verification"
+    fi
+
+    # --- Cloud-init network override (opt-in only) ---
+    if command_exists cloud-init && [[ -d /etc/cloud/cloud.cfg.d ]]; then
+        local cloud_init_disabled=false
+        [[ -f /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg ]] && cloud_init_disabled=true
+
+        if [[ "$cloud_init_disabled" == true ]]; then
+            msg_info "cloud-init network management already disabled"
+        else
+            msg ""
+            msg "  ${YELLOW}⚠️${RESET}  cloud-init detected — it may reset DNS settings on reboot."
+            if confirm "  Disable cloud-init network management?" "N"; then
+                if [[ "$DRY_RUN" == true ]]; then
+                    msg_info "[DRY-RUN] Would disable cloud-init network config"
+                else
+                    echo "network: {config: disabled}" > /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg
+                    msg_ok "cloud-init network management disabled"
+                    msg_info "DNS settings will now persist across reboots"
+                fi
+            fi
+        fi
     fi
 
     msg_done "DNS configuration complete"
