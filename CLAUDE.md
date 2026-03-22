@@ -108,6 +108,42 @@ CI runs ShellCheck + Docker integration tests on push to `main` and on PRs.
 - **Config changes:** Always `backup_file` first, always verify after
 - **OS dispatch:** `case "$OS_FAMILY" in rhel) ... ;; debian) ... ;; esac`
 
+## Version Management & Release Workflow
+
+**CRITICAL: Every commit that changes `fta-toolbox.sh` behavior MUST bump the version.** The self-update mechanism (menu option 99) compares the version string to decide whether to update. If you change code without bumping the version, users will never receive the update.
+
+### How self-update works
+
+1. Downloads `fta-toolbox.sh` from `main` branch via raw GitHub URL
+2. Extracts `TOOLBOX_VERSION` from the downloaded file
+3. Compares to the running version — **string equality, not semver**
+4. If different → offers to replace itself in-place and exits
+
+### Version location
+
+Line 26 of `fta-toolbox.sh`:
+```bash
+readonly TOOLBOX_VERSION="X.Y.Z"
+```
+
+### When to bump
+
+| Change type | Bump | Example |
+|-------------|------|---------|
+| New module, major feature | **Minor** (X.Y+1.0) | 2.1.0 → 2.2.0 |
+| Bug fix, tweak, small improvement | **Patch** (X.Y.Z+1) | 2.1.0 → 2.1.1 |
+| Breaking changes, major rewrite | **Major** (X+1.0.0) | 2.1.0 → 3.0.0 |
+| Docs-only changes (README, CLAUDE.md) | **No bump needed** | — |
+
+### Commit workflow
+
+1. Make your code changes
+2. Bump `TOOLBOX_VERSION` on line 26
+3. Run `bash -n fta-toolbox.sh` to syntax check
+4. Commit and push
+
+**Never push behavioral changes to `fta-toolbox.sh` without a version bump.**
+
 ## Current Modules (menu numbers)
 
 1=System Info, 2=Update, 3=Network Tools, 4=Modern CLI, 5=Node.js, 6=Docker, 7=Portainer, 8=Watchtower, 9=Security, 10=Performance, 11=Timezone, 12=Swap, 13=DNS, 88=Full Setup, 99=Self-Update, 0=Exit
