@@ -23,7 +23,7 @@ set -uo pipefail
 # SECTION 1: CONSTANTS & CONFIGURATION
 # =============================================================================
 
-readonly TOOLBOX_VERSION="2.1.0"
+readonly TOOLBOX_VERSION="2.2.0"
 readonly TOOLBOX_NAME="FTA Server Toolbox"
 readonly LOG_FILE="/var/log/fta-toolbox.log"
 readonly CONFIG_DIR="/root/.fta-toolbox"
@@ -405,25 +405,27 @@ detect_os() {
 # SECTION 6: SYSTEM INFORMATION MODULE
 # =============================================================================
 
+# Display comprehensive system information and toolbox configuration status.
+# Shows hardware stats, network info, and a full dashboard of every service
+# and configuration managed by the toolbox (security, firewall, Docker, DNS,
+# performance tuning, NTP, swap, Portainer, Watchtower, and CLI tools).
 show_system_info() {
     msg_header "📋 System Information"
 
-    # Basic system info
+    # --- Hardware & OS ---
+    msg "  ${BOLD}${CYAN}── System ──${RESET}"
     msg "  ${BOLD}Hostname:${RESET}       $(hostname 2>/dev/null || cat /etc/hostname 2>/dev/null || echo 'N/A')"
     msg "  ${BOLD}OS:${RESET}             $OS_PRETTY"
     msg "  ${BOLD}Kernel:${RESET}         $(uname -r)"
     msg "  ${BOLD}Architecture:${RESET}   $ARCH"
     msg "  ${BOLD}Uptime:${RESET}         $(uptime -p 2>/dev/null || uptime | sed 's/.*up //' | sed 's/,.*//')"
-    msg ""
 
-    # CPU
     local cpu_model
     cpu_model=$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2 | xargs)
     local cpu_cores
     cpu_cores=$(nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "?")
     msg "  ${BOLD}CPU:${RESET}            ${cpu_model:-Unknown} (${cpu_cores} cores)"
 
-    # Memory
     if command_exists free; then
         local mem_total mem_used mem_pct
         mem_total=$(free -h | awk '/^Mem:/{print $2}')
@@ -432,55 +434,148 @@ show_system_info() {
         msg "  ${BOLD}Memory:${RESET}         ${mem_used} / ${mem_total} (${mem_pct}%)"
     fi
 
-    # Swap
-    if command_exists free; then
-        local swap_total
-        swap_total=$(free -h | awk '/^Swap:/{print $2}')
-        if [[ "$swap_total" == "0B" || "$swap_total" == "0" ]]; then
-            msg "  ${BOLD}Swap:${RESET}           ${YELLOW}Not configured${RESET}"
-        else
-            local swap_used
-            swap_used=$(free -h | awk '/^Swap:/{print $3}')
-            msg "  ${BOLD}Swap:${RESET}           ${swap_used} / ${swap_total}"
-        fi
-    fi
-
-    # Disk
     msg "  ${BOLD}Disk (/):${RESET}       $(df -h / | awk 'NR==2{printf "%s / %s (%s used)", $3, $2, $5}')"
     msg ""
 
-    # Network
+    # --- Network & DNS ---
+    msg "  ${BOLD}${CYAN}── Network ──${RESET}"
     local primary_ip
     primary_ip=$(hostname -I 2>/dev/null | awk '{print $1}' || ip -4 addr show scope global 2>/dev/null | grep -oP 'inet \K[\d.]+' | head -1)
     msg "  ${BOLD}Primary IP:${RESET}     ${primary_ip:-N/A}"
 
-    # Timezone
+    local current_dns=""
+    if command_exists resolvectl && systemctl is-active systemd-resolved &>/dev/null; then
+        current_dns=$(resolvectl dns 2>/dev/null | head -1)
+    elif [[ -f /etc/resolv.conf ]]; then
+        current_dns=$(grep '^nameserver' /etc/resolv.conf 2>/dev/null | awk '{print $2}' | paste -sd ', ')
+    fi
+    if [[ -n "$current_dns" ]]; then
+        msg "  ${BOLD}DNS Servers:${RESET}    ${current_dns}"
+    else
+        msg "  ${BOLD}DNS Servers:${RESET}    ${YELLOW}Unknown${RESET}"
+    fi
+
     local tz
     tz=$(timedatectl show -p Timezone --value 2>/dev/null || cat /etc/timezone 2>/dev/null || readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || echo "Unknown")
     msg "  ${BOLD}Timezone:${RESET}       $tz"
+
+    # NTP sync status
+    if ! is_container; then
+        if systemctl is-active chronyd &>/dev/null; then
+            msg "  ${BOLD}NTP Sync:${RESET}       ${GREEN}chronyd active${RESET}"
+        elif systemctl is-active systemd-timesyncd &>/dev/null; then
+            msg "  ${BOLD}NTP Sync:${RESET}       ${GREEN}timesyncd active${RESET}"
+        else
+            msg "  ${BOLD}NTP Sync:${RESET}       ${YELLOW}Not active${RESET}"
+        fi
+    fi
     msg ""
 
-    # Installed tools check
-    msg "  ${BOLD}${CYAN}── Installed Tools ──${RESET}"
-    local tools=(git docker node npm python3 bat eza fd rg fzf jq btm zoxide glances)
+    # --- Toolbox Configuration Status ---
+    msg "  ${BOLD}${CYAN}── Toolbox Status ──${RESET}"
+
+    # Swap
+    if command_exists free; then
+        local swap_total
+        swap_total=$(free -m | awk '/^Swap:/{print $2}')
+        if [[ "$swap_total" -gt 0 ]]; then
+            msg "  ${GREEN}✅${RESET} Swap            $(free -h | awk '/^Swap:/{printf "%s total, %s used", $2, $3}')"
+        else
+            msg "  ${DIM}○${RESET}  Swap            ${YELLOW}Not configured${RESET}"
+        fi
+    fi
+
+    # SSH hardening (check for FTA drop-in file)
+    if [[ -f /etc/ssh/sshd_config.d/99-fta-hardening.conf ]]; then
+        msg "  ${GREEN}✅${RESET} SSH Hardening   Applied (drop-in)"
+    elif grep -qs 'FTA Server Toolbox' /etc/ssh/sshd_config 2>/dev/null; then
+        msg "  ${GREEN}✅${RESET} SSH Hardening   Applied (inline)"
+    else
+        msg "  ${DIM}○${RESET}  SSH Hardening   ${YELLOW}Not applied${RESET}"
+    fi
+
+    # Firewall
+    if systemctl is-active firewalld &>/dev/null; then
+        msg "  ${GREEN}✅${RESET} Firewall        firewalld active"
+    elif systemctl is-active ufw &>/dev/null || ufw status 2>/dev/null | grep -q "Status: active"; then
+        msg "  ${GREEN}✅${RESET} Firewall        ufw active"
+    else
+        msg "  ${DIM}○${RESET}  Firewall        ${YELLOW}Not active${RESET}"
+    fi
+
+    # fail2ban
+    if systemctl is-active fail2ban &>/dev/null; then
+        msg "  ${GREEN}✅${RESET} fail2ban        Running"
+    elif command_exists fail2ban-server; then
+        msg "  ${YELLOW}⚠️${RESET}  fail2ban        Installed but not running"
+    else
+        msg "  ${DIM}○${RESET}  fail2ban        ${YELLOW}Not installed${RESET}"
+    fi
+
+    # Performance tuning (check for FTA sysctl file)
+    if [[ -f /etc/sysctl.d/99-fta-performance.conf ]]; then
+        msg "  ${GREEN}✅${RESET} Perf Tuning     Applied"
+    else
+        msg "  ${DIM}○${RESET}  Perf Tuning     ${YELLOW}Not applied${RESET}"
+    fi
+
+    # Docker
+    if command_exists docker && docker info &>/dev/null 2>&1; then
+        local docker_ver
+        docker_ver=$(docker --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1)
+        msg "  ${GREEN}✅${RESET} Docker          ${docker_ver}"
+    elif command_exists docker; then
+        msg "  ${YELLOW}⚠️${RESET}  Docker          Installed but not running"
+    else
+        msg "  ${DIM}○${RESET}  Docker          ${YELLOW}Not installed${RESET}"
+    fi
+
+    # Portainer
+    if command_exists docker && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^portainer$'; then
+        msg "  ${GREEN}✅${RESET} Portainer       Running"
+    elif command_exists docker && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^portainer$'; then
+        msg "  ${YELLOW}⚠️${RESET}  Portainer       Stopped"
+    else
+        msg "  ${DIM}○${RESET}  Portainer       ${YELLOW}Not deployed${RESET}"
+    fi
+
+    # Watchtower
+    if command_exists docker && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^watchtower$'; then
+        msg "  ${GREEN}✅${RESET} Watchtower      Running"
+    elif command_exists docker && docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q '^watchtower$'; then
+        msg "  ${YELLOW}⚠️${RESET}  Watchtower      Stopped"
+    else
+        msg "  ${DIM}○${RESET}  Watchtower      ${YELLOW}Not deployed${RESET}"
+    fi
+
+    # Node.js
+    if command_exists node; then
+        msg "  ${GREEN}✅${RESET} Node.js         $(node --version 2>/dev/null)"
+    else
+        msg "  ${DIM}○${RESET}  Node.js         ${YELLOW}Not installed${RESET}"
+    fi
+    msg ""
+
+    # --- Installed CLI Tools ---
+    msg "  ${BOLD}${CYAN}── CLI Tools ──${RESET}"
+    local tools=(bat eza fd rg fzf jq yq btm dust duf ncdu zoxide gping fastfetch glances lazydocker lazygit)
+    local installed_count=0 total_count=${#tools[@]}
     for tool in "${tools[@]}"; do
         if command_exists "$tool"; then
-            local ver
+            ((installed_count++))
+            local ver=""
             case "$tool" in
-                node)    ver=$(node --version 2>/dev/null) ;;
-                python3) ver=$(python3 -c 'import sys; print(".".join(map(str,sys.version_info[:3])))' 2>/dev/null || python3 --version 2>/dev/null | awk '{print $2}') ;;
-                docker)  ver=$(docker --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1) ;;
-                git)     ver=$(git --version 2>/dev/null | awk '{print $3}') ;;
                 bat)     ver=$(bat --version 2>/dev/null | awk '{print $2}' | head -1) ;;
                 rg)      ver=$(rg --version 2>/dev/null | head -1 | awk '{print $2}') ;;
                 btm)     ver=$(btm --version 2>/dev/null | awk '{print $2}') ;;
                 *)       ver=$(${tool} --version 2>/dev/null | head -1 | grep -oP '[\d]+\.[\d.]+' | head -1) ;;
             esac
-            printf "  ${GREEN}  ✓${RESET} %-12s ${DIM}%s${RESET}\n" "$tool" "${ver:-}"
+            printf "  ${GREEN}  ✓${RESET} %-14s ${DIM}%s${RESET}\n" "$tool" "${ver:-}"
         else
-            printf "  ${DIM}  ○${RESET} %-12s ${DIM}not installed${RESET}\n" "$tool"
+            printf "  ${DIM}  ○${RESET} %-14s ${DIM}not installed${RESET}\n" "$tool"
         fi
     done
+    msg "  ${DIM}  ($installed_count/$total_count tools installed)${RESET}"
     msg ""
 
     # Container detection
