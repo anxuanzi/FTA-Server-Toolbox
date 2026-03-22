@@ -64,6 +64,7 @@ sudo ./fta-toolbox.sh --yes full
 | 9 | 🔒 **Security Hardening** | SSH hardening, firewall (firewalld/ufw), fail2ban |
 | 10 | ⚡ **Performance Tuning** | TCP BBR, kernel buffer tuning, file descriptor limits |
 | 11 | 🕐 **Timezone & NTP** | Interactive timezone picker + chronyd/NTP sync |
+| 13 | 🌍 **DNS Configuration** | Preset DNS providers (Cloudflare, Google, OpenDNS, DNSPod, DigitalOcean) or custom |
 
 ### 🔵 Optional Modules (opt-in during full setup)
 
@@ -138,6 +139,7 @@ The interactive menu lets you pick any module:
    10)  ⚡  Performance Tuning
    11)  🕐  Timezone & NTP
    12)  💾  Swap Management
+   13)  🌍  DNS Configuration
     ─────────────────────────────────────
    88)  🚀  Full Auto Setup
    99)  📦  Self-Update Script
@@ -169,7 +171,7 @@ sudo ./fta-toolbox.sh info
 ### 📦 Available Module Names
 
 ```
-info · update · network · modern · nodejs · docker · portainer · watchtower · security · tuning · timezone · swap · full
+info · update · network · modern · nodejs · docker · portainer · watchtower · security · tuning · timezone · swap · dns · full
 ```
 
 ---
@@ -213,6 +215,43 @@ info · update · network · modern · nodejs · docker · portainer · watchtow
 - 📂 File descriptors: **1,048,576** (soft + hard)
 - ⚙️ Processes: **65,536** (soft + hard)
 - 🔧 systemd `DefaultLimitNOFILE` updated
+
+---
+
+## 🌍 DNS Configuration
+
+Choose from five popular public DNS providers or enter custom servers:
+
+| # | Provider | Primary | Secondary |
+|:-:|:---------|:--------|:----------|
+| 1 | ☁️ **Cloudflare** (default) | `1.1.1.1` | `1.0.0.1` |
+| 2 | 🔍 **Google** | `8.8.8.8` | `8.8.4.4` |
+| 3 | 🛡️ **OpenDNS** | `208.67.222.222` | `208.67.220.220` |
+| 4 | 🇨🇳 **DNSPod** | `119.29.29.29` | `119.28.28.28` |
+| 5 | 🌊 **DigitalOcean** | `67.207.67.2` | `67.207.67.3` |
+| 0 | ✏️ **Custom** | *(you provide)* | *(optional)* |
+
+### 🔧 How It Works
+
+The module auto-detects the DNS management backend on your system and applies changes through the correct channel:
+
+| Backend | Systems | Config Path |
+|:--------|:--------|:------------|
+| **systemd-resolved** | Ubuntu 22.04/24.04, modern Debian | `/etc/systemd/resolved.conf` |
+| **NetworkManager** | CentOS/RHEL/Rocky/Alma | `nmcli` connection settings |
+| **Direct** (fallback) | Minimal installs | `/etc/resolv.conf` |
+
+- 💾 Original configuration is **backed up** before any change
+- ✅ DNS resolution is **verified** after applying (via `dig` or `nslookup`)
+- 🔍 Supports `--dry-run` to preview changes without modifying anything
+
+```bash
+# 🌍 Interactive DNS setup
+sudo ./fta-toolbox.sh dns
+
+# ☁️ Set Cloudflare DNS non-interactively
+sudo ./fta-toolbox.sh --yes dns
+```
 
 ---
 

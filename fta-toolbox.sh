@@ -1766,6 +1766,13 @@ module_swap() {
 # SECTION 17: DNS MODULE
 # =============================================================================
 
+# Configure DNS resolver servers.
+# Supports five presets (Cloudflare, Google, OpenDNS, DNSPod, DigitalOcean)
+# plus manual custom entry.  Applies changes through the appropriate backend:
+#   - systemd-resolved  → /etc/systemd/resolved.conf (Ubuntu / modern Debian)
+#   - NetworkManager    → nmcli (RHEL family)
+#   - fallback          → /etc/resolv.conf direct write
+# Original config is backed up before any modification.
 module_dns() {
     msg_header "🌍 DNS Configuration"
 
