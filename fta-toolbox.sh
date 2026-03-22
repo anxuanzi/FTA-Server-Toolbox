@@ -11,7 +11,7 @@
 # Version:     2.0.0
 # Author:      FantasticTony
 # License:     Apache 2.0
-# Repository:  https://github.com/anxuanzi/shell-scripts
+# Repository:  https://github.com/anxuanzi/FTA-Server-Toolbox
 # Supported:   CentOS Stream 9/10, RHEL 9/10, Rocky 9/10, AlmaLinux 9/10,
 #              Ubuntu 22.04/24.04 LTS, Debian 12
 # =============================================================================
@@ -28,7 +28,7 @@ readonly TOOLBOX_NAME="FTA Server Toolbox"
 readonly LOG_FILE="/var/log/fta-toolbox.log"
 readonly CONFIG_DIR="/root/.fta-toolbox"
 readonly LOCK_FILE="/tmp/fta-toolbox.lock"
-readonly GITHUB_REPO="anxuanzi/shell-scripts"
+readonly GITHUB_REPO="anxuanzi/FTA-Server-Toolbox"
 readonly SELF_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/fta-toolbox.sh"
 
 BACKUP_DIR=""

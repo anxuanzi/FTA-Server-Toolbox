@@ -12,7 +12,7 @@
 # --- Configuration ---
 # !!! IMPORTANT: Update these variables if you are using a fork !!!
 GITHUB_USER="anxuanzi"
-GITHUB_REPO="shell-scripts"
+GITHUB_REPO="FTA-Server-Toolbox"
 BRANCH="main" # Or your specific branch
 
 # Construct the base URL for raw GitHub content

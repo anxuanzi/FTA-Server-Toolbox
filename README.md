@@ -16,7 +16,7 @@ Your ultimate server management companion — a single, comprehensive script for
 
 ```bash
 # Download
-curl -fsSLO https://raw.githubusercontent.com/anxuanzi/shell-scripts/main/fta-toolbox.sh
+curl -fsSLO https://raw.githubusercontent.com/anxuanzi/FTA-Server-Toolbox/main/fta-toolbox.sh
 
 # Make executable
 chmod +x fta-toolbox.sh
