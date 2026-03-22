@@ -77,7 +77,7 @@ case "$TARGET" in
         ;;
     *)
         msg "Usage: $0 [centos9|centos10|ubuntu2404|all] [module]"
-        msg "Modules: info, update, network, modern, nodejs, security, tuning, timezone, full"
+        msg "Modules: info, update, network, modern, nodejs, docker, portainer, watchtower, security, tuning, timezone, swap, dns, full"
         exit 1
         ;;
 esac
