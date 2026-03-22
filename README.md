@@ -61,9 +61,9 @@ sudo ./fta-toolbox.sh --yes full
 | 2 | 🔄 **System Update** | Full system update + essential packages (git, vim, tmux, make, gcc, python3...) |
 | 3 | 🌐 **Network Tools** | dig, traceroute, mtr, nmap, iperf3, tcpdump, whois, socat |
 | 4 | 🛠️ **Modern CLI Tools** | 17 modern Unix tool replacements ([see below](#-modern-cli-tools)) |
-| 8 | 🔒 **Security Hardening** | SSH hardening, firewall (firewalld/ufw), fail2ban |
-| 9 | ⚡ **Performance Tuning** | TCP BBR, kernel buffer tuning, file descriptor limits |
-| 10 | 🕐 **Timezone & NTP** | Interactive timezone picker + chronyd/NTP sync |
+| 9 | 🔒 **Security Hardening** | SSH hardening, firewall (firewalld/ufw), fail2ban |
+| 10 | ⚡ **Performance Tuning** | TCP BBR, kernel buffer tuning, file descriptor limits |
+| 11 | 🕐 **Timezone & NTP** | Interactive timezone picker + chronyd/NTP sync |
 
 ### 🔵 Optional Modules (opt-in during full setup)
 
@@ -71,13 +71,15 @@ sudo ./fta-toolbox.sh --yes full
 |:---:|--------|-------------|
 | 5 | 💚 **Node.js** | Node.js LTS via NodeSource (choose v20/v22/v24) + yarn & pnpm |
 | 6 | 🐳 **Docker Engine** | Docker CE + Compose + Buildx from official repos |
-| 7 | 🏗️ **Portainer & Watchtower** | Docker web UI + automatic container updates |
-| 11 | 💾 **Swap Management** | Create/resize swap file with smart size recommendation |
+| 7 | 🏗️ **Portainer** | Docker web UI for container management |
+| 8 | 👀 **Watchtower** | Automatic container image updates |
+| 12 | 💾 **Swap Management** | Create/resize swap file with smart size recommendation |
 
 > 💡 **Tip:** In `--yes full` mode, only core modules run. Install optional services individually:
 > ```bash
 > sudo ./fta-toolbox.sh --yes docker
 > sudo ./fta-toolbox.sh --yes portainer
+> sudo ./fta-toolbox.sh --yes watchtower
 > ```
 
 ---
@@ -130,11 +132,12 @@ The interactive menu lets you pick any module:
     4)  🛠️   Modern CLI Tools
     5)  💚  Node.js (LTS)
     6)  🐳  Docker Engine
-    7)  🏗️   Portainer & Watchtower
-    8)  🔒  Security Hardening
-    9)  ⚡  Performance Tuning
-   10)  🕐  Timezone & NTP
-   11)  💾  Swap Management
+    7)  🏗️   Portainer (Docker UI)
+    8)  👀  Watchtower (Auto-updater)
+    9)  🔒  Security Hardening
+   10)  ⚡  Performance Tuning
+   11)  🕐  Timezone & NTP
+   12)  💾  Swap Management
     ─────────────────────────────────────
    88)  🚀  Full Auto Setup
    99)  📦  Self-Update Script
@@ -166,7 +169,7 @@ sudo ./fta-toolbox.sh info
 ### 📦 Available Module Names
 
 ```
-info · update · network · modern · nodejs · docker · portainer · security · tuning · timezone · swap · full
+info · update · network · modern · nodejs · docker · portainer · watchtower · security · tuning · timezone · swap · full
 ```
 
 ---
@@ -259,7 +262,7 @@ chmod +x test/run-tests.sh
 | 🔄 | **Idempotent** | Safe to re-run — checks for existing installations before acting |
 | 🛡️ | **Non-destructive** | Never removes existing configs; uses drop-in files where possible |
 | 📝 | **Logging** | All operations logged to `/var/log/fta-toolbox.log` |
-| ✅ | **Opt-in services** | Docker, Node.js, Portainer require explicit selection |
+| ✅ | **Opt-in services** | Docker, Node.js, Portainer, Watchtower require explicit selection |
 
 ---
 
