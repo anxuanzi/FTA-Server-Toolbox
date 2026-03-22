@@ -1,0 +1,9 @@
+FROM quay.io/centos/centos:stream10
+
+RUN dnf install -y --allowerasing curl sudo which procps-ng util-linux && dnf clean all
+
+COPY fta-toolbox.sh /root/fta-toolbox.sh
+RUN chmod +x /root/fta-toolbox.sh
+
+WORKDIR /root
+CMD ["/bin/bash"]

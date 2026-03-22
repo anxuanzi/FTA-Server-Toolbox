@@ -1,126 +1,216 @@
-# FTA System Utility Scripts
+# 🧰 FTA Server Toolbox
 
-This repository contains a collection of shell scripts designed to assist with common system administration tasks on
-CentOS 9 Stream and compatible systems. An entry point script, `setup.sh`, is provided for easy downloading and
-execution of these utilities.
+Your ultimate server management companion — a single, comprehensive script for initializing, hardening, and maintaining Linux servers.
 
 ## Features
 
-* **OS Initialization**: Comprehensive server setup including SELinux configuration, software installation (common
-  tools, Node.js, Yarn, modern CLI alternatives), SSH hardening, system limits, and kernel parameter tuning (
-  `fta_os_init.sh`).
-* **Docker Installation**: Installs Docker CE, Docker Compose, and related tools (`install_docker.sh`).
-* **Portainer & Watchtower**: Deploys Portainer (Docker management UI) and Watchtower (automatic container updates) (
-  `install_portainer.sh`).
-* **Timezone Configuration**: Scripts to set the system timezone to specific regions (e.g., America/Chicago,
-  America/Los_Angeles) and ensure `chronyd` is active (`set_time_chicago.sh`, `set_time_la.sh`).
-* **User-Friendly Interface**: A `setup.sh` script to download all necessary utilities and provide a menu-driven
-  interface for their execution.
-* **Enhanced Output**: Scripts use colored output for better readability and provide clear feedback on operations.
-* **Idempotency**: Scripts are designed to be safe to re-run, checking for existing configurations where possible.
-* **Common Utilities**: A `utils.sh` script provides shared functions for messaging and error handling to all other
-  scripts.
+- **Single Script** — Everything in one file. No dependencies, no multi-file downloads
+- **Multi-OS Support** — CentOS Stream 9/10, RHEL 9/10, Rocky Linux, AlmaLinux, Ubuntu 22.04/24.04, Debian 12
+- **Multi-Architecture** — x86_64 and ARM64 (aarch64) fully supported
+- **Latest Software** — Always fetches the latest stable versions from official sources
+- **Beautiful UX** — Interactive menus with emoji indicators, colored output, and step-by-step guidance
+- **Production Safe** — Config backups, dry-run mode, container detection, idempotent operations
+- **Modular Design** — Run individual modules or the full setup wizard
 
-## Prerequisites
+## Quick Start
 
-* A CentOS 9 Stream based system (or a compatible RHEL derivative).
-* Internet access for downloading scripts and packages.
-* `curl` or `wget` installed on your system (for the `setup.sh` script to download other files).
-* Root or sudo privileges are required to run these scripts, as they perform system-level configurations.
+```bash
+# Download
+curl -fsSLO https://raw.githubusercontent.com/anxuanzi/shell-scripts/main/fta-toolbox.sh
 
-## Getting Started: Using `setup.sh`
+# Make executable
+chmod +x fta-toolbox.sh
 
-The `setup.sh` script is the recommended way to get started. It will download all the other scripts and provide you with
-an interactive menu.
+# Run interactive menu
+sudo ./fta-toolbox.sh
 
-1. **Download `setup.sh`**:
-   You can download `setup.sh` using either `curl` or `wget`.
+# Or run full setup with auto-accept
+sudo ./fta-toolbox.sh --yes full
+```
 
-   Using `curl`:
-   ```bash
-   curl -sSLfO https://raw.githubusercontent.com/anxuanzi/shell-scripts/main/setup.sh
-   ```
+## Modules
 
-   Using `wget`:
-   ```bash
-   wget -qO setup.sh https://raw.githubusercontent.com/anxuanzi/shell-scripts/main/setup.sh
-   ```
+| # | Module | Description |
+|---|--------|-------------|
+| 1 | 📋 System Information | Display system details, installed tools, resource usage |
+| 2 | 🔄 System Update | Full system update + essential packages (git, vim, tmux, make, gcc, python3, etc.) |
+| 3 | 🌐 Network Tools | dig, traceroute, mtr, nmap, iperf3, tcpdump, whois, socat |
+| 4 | 🛠️ Modern CLI Tools | 15+ modern Unix tool replacements (see below) |
+| 5 | 💚 Node.js | Node.js LTS via NodeSource (choose v20/v22/v24) + yarn & pnpm |
+| 6 | 🐳 Docker Engine | Docker CE + Compose + Buildx from official repos |
+| 7 | 🏗️ Portainer & Watchtower | Docker web UI + automatic container updates |
+| 8 | 🔒 Security Hardening | SSH hardening, firewall (firewalld/ufw), fail2ban |
+| 9 | ⚡ Performance Tuning | TCP BBR, kernel buffer tuning, file descriptor limits |
+| 10 | 🕐 Timezone & NTP | Interactive timezone picker + chronyd/NTP sync |
+| 11 | 💾 Swap Management | Create/resize swap file with smart size recommendation |
+| 88 | 🚀 Full Auto Setup | Guided wizard through all modules with per-step control |
 
-2. **Make `setup.sh` Executable**:
-   ```bash
-   chmod +x setup.sh
-   ```
+## Modern CLI Tools Installed
 
-3. **Run `setup.sh`**:
-   ```bash
-   ./setup.sh
-   ```
-   The script will first attempt to download all the necessary utility scripts (like `fta_os_init.sh`, `utils.sh`, etc.)
-   into the current directory.
-   Once the downloads are complete, you will be presented with a menu to choose which operation you want to perform.
+| Tool | Replaces | Source |
+|------|----------|--------|
+| [bat](https://github.com/sharkdp/bat) | `cat` | Syntax highlighting, git integration |
+| [eza](https://github.com/eza-community/eza) | `ls` | Icons, git status, tree view |
+| [fd](https://github.com/sharkdp/fd) | `find` | Intuitive syntax, fast |
+| [ripgrep](https://github.com/BurntSushi/ripgrep) | `grep` | Extremely fast recursive search |
+| [fzf](https://github.com/junegunn/fzf) | — | Fuzzy finder for everything |
+| [jq](https://github.com/stedolan/jq) | — | JSON processor |
+| [yq](https://github.com/mikefarah/yq) | — | YAML/XML/TOML processor |
+| [bottom](https://github.com/ClementTsang/bottom) | `top`/`htop` | Beautiful system monitor |
+| [dust](https://github.com/bootandy/dust) | `du` | Intuitive disk usage |
+| [duf](https://github.com/muesli/duf) | `df` | Disk free overview |
+| [ncdu](https://dev.yorhel.nl/ncdu) | `du` | Interactive disk usage |
+| [zoxide](https://github.com/ajeetdsouza/zoxide) | `cd` | Smarter directory navigation |
+| [gping](https://github.com/orf/gping) | `ping` | Ping with live graph |
+| [fastfetch](https://github.com/fastfetch-cli/fastfetch) | `neofetch` | System info display |
+| [glances](https://github.com/nicolargo/glances) | `top` | Advanced system monitoring dashboard |
+| [lazydocker](https://github.com/jesseduffield/lazydocker) | — | Docker TUI manager |
+| [lazygit](https://github.com/jesseduffield/lazygit) | — | Git TUI manager |
 
-   **Menu Options typically include**:
-    * Initialize OS
-    * Install Docker
-    * Install Portainer & Watchtower
-    * Set Timezone to Chicago
-    * Set Timezone to Los Angeles
-    * Re-download/Update all scripts
-    * Exit
+Tools are installed from package managers when available, with automatic fallback to GitHub releases or pipx.
 
-## Script Details
+## Usage
 
-### `setup.sh`
+### Interactive Mode (Menu)
 
-* **Purpose**: Entry point to download all other scripts and provide a selection menu.
-* **Usage**: Download, make executable, and run as shown above.
+```bash
+sudo ./fta-toolbox.sh
+```
 
-### `utils.sh`
+### Non-Interactive Mode (CLI)
 
-* **Purpose**: Contains common utility functions (colored messaging, error checking) sourced by other scripts. Not meant
-  to be run directly.
+```bash
+# Run a specific module
+sudo ./fta-toolbox.sh --yes modern
 
-### `fta_os_init.sh`
+# Preview changes without executing
+sudo ./fta-toolbox.sh --dry-run --yes full
 
-* **Purpose**: Performs initial server setup. This is a comprehensive script. Review its actions if you are particular
-  about specific configurations.
-* **Key Actions**: Disables SELinux (sets to permissive then configures to disabled), installs EPEL, essential packages,
-  Node.js, Yarn, various modern CLI tools (like `rg`, `btm`, `glances`, `dust`, `procs`, `curlie`, `duf`, `fd`),
-  configures aliases for them, hardens SSH, adjusts system limits, and tunes kernel parameters. Performs a system update
-  at the end.
-* **Note**: Requires a reboot for some changes (like SELinux in config and some kernel parameters) to take full effect.
+# Show system info
+sudo ./fta-toolbox.sh info
+```
 
-### `install_docker.sh`
+### CLI Options
 
-* **Purpose**: Installs Docker Community Edition and Docker Compose.
-* **Key Actions**: Removes old Docker versions, sets up the official Docker repository, installs Docker packages, starts
-  and enables the Docker service. Verifies installation with `hello-world`.
+| Flag | Description |
+|------|-------------|
+| `-h, --help` | Show help message |
+| `-v, --version` | Show version |
+| `-y, --yes` | Skip all confirmation prompts |
+| `--dry-run` | Preview changes without executing |
 
-### `install_portainer.sh`
+### Available Modules
 
-* **Purpose**: Installs Portainer (a web UI for Docker) and Watchtower (for automatic Docker container updates).
-* **Prerequisites**: Docker must be installed and running.
-* **Key Actions**: Creates a data volume for Portainer, runs Portainer and Watchtower containers. Configures Watchtower
-  to only update labeled containers.
+`info` `update` `network` `modern` `nodejs` `docker` `portainer` `security` `tuning` `timezone` `swap` `full`
 
-### `set_time_chicago.sh` / `set_time_la.sh`
+## Security Hardening Details
 
-* **Purpose**: Sets the system timezone (to America/Chicago or America/Los_Angeles respectively) and enables/starts
-  `chronyd` for time synchronization.
+The security module applies these changes (each can be individually accepted/declined):
 
-## Important Notes
+**SSH Hardening:**
+- Disable empty password authentication
+- Disable DNS lookups (faster connections)
+- Disable GSSAPI authentication
+- Root login: key-based only
+- Limit auth attempts to 4
+- Idle session timeout (10 min)
+- Uses sshd_config.d drop-in when supported
 
-* **Run as Root/Sudo**: These scripts perform system-level changes and require root privileges. Run them using
-  `sudo ./script_name.sh` or by logging in as root. The `setup.sh` should also be run with sufficient privileges if the
-  scripts it calls require them.
-* **Review Scripts**: It's always a good practice to review scripts downloaded from the internet before executing them,
-  especially when running as root.
-* **Customization**: If you need to customize the behavior (e.g., packages installed by `fta_os_init.sh`), you can
-  modify the scripts after they are downloaded by `setup.sh`.
-* **`setup.sh` Configuration**: The `setup.sh` script has `GITHUB_USER`, `GITHUB_REPO`, and `BRANCH` variables at the
-  top. If you are using a fork or a different branch, ensure these are updated in your copy of `setup.sh` or in the
-  script itself if you intend to distribute it.
+**Firewall:**
+- firewalld (RHEL) or ufw (Debian/Ubuntu)
+- Default: allow SSH, HTTP, HTTPS
+- Portainer port (9443) if Docker installed
+
+**fail2ban:**
+- SSH brute-force protection
+- 3 max retries, 1 hour ban
+
+## Performance Tuning Details
+
+**Kernel Parameters:**
+- TCP BBR congestion control
+- Optimized TCP buffer sizes
+- Connection backlog tuning (somaxconn: 65535)
+- TCP Fast Open enabled
+- Keepalive optimization
+- Fair queuing scheduler
+
+**System Limits:**
+- File descriptors: 1,048,576 (soft + hard)
+- Processes: 65,536 (soft + hard)
+- systemd DefaultLimitNOFILE updated
+
+## Supported Operating Systems
+
+| OS | Versions | Package Manager |
+|----|----------|-----------------|
+| CentOS Stream | 9, 10 | dnf |
+| RHEL | 9, 10 | dnf |
+| Rocky Linux | 9, 10 | dnf |
+| AlmaLinux | 9, 10 | dnf |
+| Ubuntu LTS | 22.04, 24.04 | apt |
+| Debian | 12+ | apt |
+
+## Testing
+
+The script is tested in Docker containers to ensure safety:
+
+```bash
+# Run tests
+chmod +x test/run-tests.sh
+
+# Test on CentOS 9
+./test/run-tests.sh centos9 info
+
+# Test on CentOS 10
+./test/run-tests.sh centos10 modern
+
+# Test on Ubuntu 24.04
+./test/run-tests.sh ubuntu2404 modern
+
+# Test all platforms
+./test/run-tests.sh all info
+```
+
+## Production Safety
+
+- **Backups** — All config files are backed up before modification to `~/.fta-toolbox/backups/`
+- **Dry-run** — Preview all changes with `--dry-run` before applying
+- **Container-aware** — Detects Docker/LXC environments and skips incompatible operations
+- **Idempotent** — Safe to re-run; checks for existing installations
+- **Non-destructive** — Never removes existing configurations; uses drop-in files where possible
+- **Logging** — All operations logged to `/var/log/fta-toolbox.log`
+
+## Self-Update
+
+```bash
+sudo ./fta-toolbox.sh
+# Select option 99 from the menu
+```
+
+## Project Structure
+
+```
+├── fta-toolbox.sh           # Main toolbox script (single file, everything included)
+├── README.md                # This file
+├── LICENSE                  # Apache 2.0
+├── .shellcheckrc            # ShellCheck configuration
+├── .github/workflows/ci.yml # GitHub Actions CI pipeline
+└── test/
+    ├── Dockerfile.centos9   # CentOS 9 test container
+    ├── Dockerfile.centos10  # CentOS 10 test container
+    ├── Dockerfile.ubuntu2404 # Ubuntu 24.04 test container
+    └── run-tests.sh         # Docker test runner
+```
+
+## Legacy Scripts
+
+The original multi-file scripts (`setup.sh`, `fta_os_init.sh`, `install_docker.sh`, etc.) are still available for reference but are superseded by `fta-toolbox.sh`.
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE)
 
 ## Contributing
 
-Feel free to fork this repository, make improvements, and submit pull requests.
+Contributions welcome! Fork, improve, and submit a pull request.

@@ -1,0 +1,10 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y curl sudo procps && apt-get clean
+
+COPY fta-toolbox.sh /root/fta-toolbox.sh
+RUN chmod +x /root/fta-toolbox.sh
+
+WORKDIR /root
+CMD ["/bin/bash"]

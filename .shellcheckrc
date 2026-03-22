@@ -1,0 +1,22 @@
+# ShellCheck configuration for FTA Server Toolbox
+# https://www.shellcheck.net/wiki/
+
+# SC2034: Variable appears unused — many variables are used across functions
+# or set for later conditional checks (e.g., ARCH_ALT, ARCH_GH, OS_* vars).
+disable=SC2034
+
+# SC2086: Double quote to prevent globbing and word splitting — intentional
+# in many places where variables hold single known-safe tokens (package names,
+# command flags, OS identifiers).
+disable=SC2086
+
+# SC2155: Declare and assign separately to avoid masking return values —
+# acceptable in non-critical assignments like local variable initialization.
+disable=SC2155
+
+# SC2059: Don't use variables in printf format string — we intentionally use
+# variables containing ANSI color codes in format strings.
+disable=SC2059
+
+# SC1091: Not following sourced files — sourced paths are runtime-dependent.
+disable=SC1091

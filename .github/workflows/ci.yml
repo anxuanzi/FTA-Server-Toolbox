@@ -1,0 +1,123 @@
+# =============================================================================
+# FTA Server Toolbox — CI Pipeline
+# =============================================================================
+# Lint + syntax check runs first (fast gate). Integration tests run in Docker
+# containers using a matrix strategy:
+#   - Critical modules (info, modern, security, tuning) test on BOTH OSes
+#   - Secondary modules (update, network, timezone) test on Ubuntu only
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Cancel in-progress runs for the same branch/PR to save resources.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ---------------------------------------------------------------------------
+# Job 1: Fast lint and syntax validation
+# ---------------------------------------------------------------------------
+jobs:
+  lint:
+    name: Lint & Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: ShellCheck — fta-toolbox.sh
+        run: shellcheck --severity=warning fta-toolbox.sh
+
+      - name: ShellCheck — supporting scripts
+        run: |
+          for f in setup.sh utils.sh test/run-tests.sh; do
+            if [[ -f "$f" ]]; then
+              echo "--- Checking $f ---"
+              shellcheck --severity=warning "$f"
+            fi
+          done
+
+      - name: Bash syntax check
+        run: bash -n fta-toolbox.sh
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Integration tests in Docker containers
+  # ---------------------------------------------------------------------------
+  integration:
+    name: "Test: ${{ matrix.module }} on ${{ matrix.os }}"
+    needs: lint
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # Critical modules test on all 3 OSes; secondary modules on Ubuntu only.
+        include:
+          # --- Critical modules: all 3 OSes ---
+          - { os: centos9,    module: info,     dockerfile: test/Dockerfile.centos9    }
+          - { os: centos10,   module: info,     dockerfile: test/Dockerfile.centos10   }
+          - { os: ubuntu2404, module: info,     dockerfile: test/Dockerfile.ubuntu2404 }
+          - { os: centos9,    module: modern,   dockerfile: test/Dockerfile.centos9    }
+          - { os: centos10,   module: modern,   dockerfile: test/Dockerfile.centos10   }
+          - { os: ubuntu2404, module: modern,   dockerfile: test/Dockerfile.ubuntu2404 }
+          - { os: centos9,    module: security, dockerfile: test/Dockerfile.centos9    }
+          - { os: centos10,   module: security, dockerfile: test/Dockerfile.centos10   }
+          - { os: ubuntu2404, module: security, dockerfile: test/Dockerfile.ubuntu2404 }
+          - { os: centos9,    module: tuning,   dockerfile: test/Dockerfile.centos9    }
+          - { os: centos10,   module: tuning,   dockerfile: test/Dockerfile.centos10   }
+          - { os: ubuntu2404, module: tuning,   dockerfile: test/Dockerfile.ubuntu2404 }
+          # --- Secondary modules: Ubuntu only ---
+          - { os: ubuntu2404, module: update,   dockerfile: test/Dockerfile.ubuntu2404 }
+          - { os: ubuntu2404, module: network,  dockerfile: test/Dockerfile.ubuntu2404 }
+          - { os: ubuntu2404, module: timezone, dockerfile: test/Dockerfile.ubuntu2404 }
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build Docker image (${{ matrix.os }})
+        run: |
+          docker build \
+            -t fta-test-${{ matrix.os }} \
+            -f ${{ matrix.dockerfile }} \
+            .
+
+      - name: Run module — ${{ matrix.module }}
+        timeout-minutes: 15
+        run: |
+          docker run --rm \
+            fta-test-${{ matrix.os }} \
+            /root/fta-toolbox.sh --yes ${{ matrix.module }}
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Summary gate — single required status check for branch protection
+  # ---------------------------------------------------------------------------
+  ci-pass:
+    name: CI Pass
+    if: always()
+    needs: [lint, integration]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        run: |
+          if [[ "${{ needs.lint.result }}" != "success" ]]; then
+            echo "::error::Lint job failed"
+            exit 1
+          fi
+          if [[ "${{ needs.integration.result }}" != "success" ]]; then
+            echo "::error::Integration tests failed"
+            exit 1
+          fi
+          echo "All checks passed."
