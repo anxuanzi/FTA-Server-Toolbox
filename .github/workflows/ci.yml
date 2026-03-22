@@ -40,14 +40,8 @@ jobs:
       - name: ShellCheck — fta-toolbox.sh
         run: shellcheck --severity=warning fta-toolbox.sh
 
-      - name: ShellCheck — supporting scripts
-        run: |
-          for f in setup.sh utils.sh test/run-tests.sh; do
-            if [[ -f "$f" ]]; then
-              echo "--- Checking $f ---"
-              shellcheck --severity=warning "$f"
-            fi
-          done
+      - name: ShellCheck — test runner
+        run: shellcheck --severity=warning test/run-tests.sh
 
       - name: Bash syntax check
         run: bash -n fta-toolbox.sh

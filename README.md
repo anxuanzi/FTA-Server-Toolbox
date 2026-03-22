@@ -203,10 +203,6 @@ sudo ./fta-toolbox.sh
     └── run-tests.sh         # Docker test runner
 ```
 
-## Legacy Scripts
-
-The original multi-file scripts (`setup.sh`, `fta_os_init.sh`, `install_docker.sh`, etc.) are still available for reference but are superseded by `fta-toolbox.sh`.
-
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE)
