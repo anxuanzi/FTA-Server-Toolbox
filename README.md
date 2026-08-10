@@ -11,7 +11,8 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/CentOS_Stream-9_%7C_10-blue?logo=centos&logoColor=white" alt="CentOS" />
-  <img src="https://img.shields.io/badge/Ubuntu-22.04_%7C_24.04-orange?logo=ubuntu&logoColor=white" alt="Ubuntu" />
+  <img src="https://img.shields.io/badge/Fedora-40+-blue?logo=fedora&logoColor=white" alt="Fedora" />
+  <img src="https://img.shields.io/badge/Ubuntu-22.04_%7C_24.04_%7C_26.04-orange?logo=ubuntu&logoColor=white" alt="Ubuntu" />
   <img src="https://img.shields.io/badge/Debian-12+-red?logo=debian&logoColor=white" alt="Debian" />
   <img src="https://img.shields.io/badge/Arch-x86__64_%7C_ARM64-green" alt="Architecture" />
   <img src="https://img.shields.io/github/license/anxuanzi/FTA-Server-Toolbox" alt="License" />
@@ -25,7 +26,7 @@
 | | Feature | Description |
 |---|---|---|
 | 📦 | **Single Script** | Everything in one file — no dependencies, no multi-file downloads |
-| 🐧 | **Multi-OS** | CentOS Stream 9/10, RHEL 9/10, Rocky, AlmaLinux, Ubuntu 22.04/24.04, Debian 12 |
+| 🐧 | **Multi-OS** | CentOS Stream 9/10, RHEL 9/10, Rocky, AlmaLinux, Fedora 40+, Ubuntu 22.04/24.04/26.04, Debian 12 |
 | 🏗️ | **Multi-Arch** | x86_64 and ARM64 (aarch64) fully supported |
 | 📡 | **Latest Software** | Auto-fetches the latest stable versions from official sources and GitHub |
 | 🛡️ | **Production Safe** | Config backups, dry-run mode, container detection, idempotent operations |
@@ -61,16 +62,17 @@ sudo ./fta-toolbox.sh --yes full
 | 2 | 🔄 **System Update** | Full system update + essential packages (git, vim, tmux, make, gcc, python3...) |
 | 3 | 🌐 **Network Tools** | dig, traceroute, mtr, nmap, iperf3, tcpdump, whois, socat |
 | 4 | 🛠️ **Modern CLI Tools** | 17 modern Unix tool replacements ([see below](#-modern-cli-tools)) |
-| 9 | 🔒 **Security Hardening** | SSH hardening, firewall (firewalld/ufw), fail2ban |
+| 9 | 🔒 **Security Hardening** | SSH hardening, fail2ban |
 | 10 | ⚡ **Performance Tuning** | TCP BBR, kernel buffer tuning, file descriptor limits |
 | 11 | 🕐 **Timezone & NTP** | Interactive timezone picker + chronyd/NTP sync |
 | 13 | 🌍 **DNS Configuration** | Preset DNS providers (Cloudflare, Google, OpenDNS, DNSPod, DigitalOcean) or custom |
+| 14 | 🔥 **Firewall Management** | Unified firewalld/ufw: status, open/close ports, presets, enable/disable ([see below](#-firewall-management)) |
 
 ### 🔵 Optional Modules (opt-in during full setup)
 
 | # | Module | Description |
 |:---:|--------|-------------|
-| 5 | 💚 **Node.js** | Node.js LTS via NodeSource (choose v20/v22/v24) + yarn & pnpm |
+| 5 | 💚 **Node.js** | Node.js LTS via NodeSource (choose v24/v22/v20) + yarn & pnpm |
 | 6 | 🐳 **Docker Engine** | Docker CE + Compose + Buildx from official repos |
 | 7 | 🏗️ **Portainer** | Docker web UI for container management |
 | 8 | 👀 **Watchtower** | Automatic container image updates |
@@ -123,7 +125,7 @@ The interactive menu lets you pick any module:
 
 ```
   ┌──────────────────────────────────────────────────────┐
-  │       🧰 FTA Server Toolbox v2.0.0                  │
+  │       🧰 FTA Server Toolbox v2.4.0                  │
   │       Ubuntu 24.04 LTS • x86_64                     │
   └──────────────────────────────────────────────────────┘
 
@@ -140,6 +142,7 @@ The interactive menu lets you pick any module:
    11)  🕐  Timezone & NTP
    12)  💾  Swap Management
    13)  🌍  DNS Configuration
+   14)  🔥  Firewall Management
     ─────────────────────────────────────
    88)  🚀  Full Auto Setup
    99)  📦  Self-Update Script
@@ -171,7 +174,7 @@ sudo ./fta-toolbox.sh info
 ### 📦 Available Module Names
 
 ```
-info · update · network · modern · nodejs · docker · portainer · watchtower · security · tuning · timezone · swap · dns · full
+info · update · network · modern · nodejs · docker · portainer · watchtower · security · tuning · timezone · swap · dns · firewall · full
 ```
 
 ---
@@ -189,15 +192,44 @@ info · update · network · modern · nodejs · docker · portainer · watchtow
 - ⏰ Idle session timeout (10 min)
 - 📁 Uses `sshd_config.d` drop-in files when supported
 
-### 🧱 Firewall
-- 🔥 firewalld (RHEL family) or ufw (Debian/Ubuntu)
-- ✅ Default rules: allow SSH, HTTP, HTTPS
-- 🐳 Auto-allows Portainer port (9443) if Docker is installed
-
 ### 🚔 fail2ban
 - 🛡️ SSH brute-force protection
 - 3️⃣ Max retries before ban
 - ⏱️ 1 hour ban duration
+
+> 🔥 Firewall setup moved to its own module in v2.4.0 — see [Firewall Management](#-firewall-management).
+
+---
+
+## 🔥 Firewall Management
+
+One interface for both firewall backends — you never have to remember `firewall-cmd` or `ufw` syntax again. The module auto-detects the backend (firewalld on RHEL family, ufw on Debian/Ubuntu, installed on demand) and every action that activates the firewall **always allows your real SSH port first**, so you can't lock yourself out.
+
+### 🖥️ Interactive menu
+
+```
+  Firewall: firewalld (active)
+
+    1)  Show status & rules
+    2)  Open a port
+    3)  Close a port
+    4)  Apply preset (web / portainer)
+    5)  Enable firewall (keeps SSH open)
+    6)  Disable firewall
+    0)  Back to main menu
+```
+
+- 🔓 **Open/close ports** — accepts `8080`, `8080/tcp`, or `5353/udp`; well-known ports map to firewalld service names automatically
+- 🎛️ **Presets** — web server (80, 443) and Portainer (9443, 8000)
+- 🛡️ **SSH lockout guard** — closing your SSH port requires typing `yes` explicitly; refused entirely in non-interactive mode
+- 📴 **Works before activation** — rules added while the firewall is off are saved (firewalld offline config / ufw stored rules)
+
+### 🤖 Non-interactive mode
+
+```bash
+# Safe defaults: deny incoming, allow SSH/HTTP/HTTPS (+ 9443 if Docker), enable
+sudo ./fta-toolbox.sh --yes firewall
+```
 
 ---
 
@@ -263,7 +295,8 @@ sudo ./fta-toolbox.sh --yes dns
 | 🔴 RHEL | 9, 10 | `dnf` |
 | 🟢 Rocky Linux | 9, 10 | `dnf` |
 | 🔵 AlmaLinux | 9, 10 | `dnf` |
-| 🟠 Ubuntu LTS | 22.04, 24.04 | `apt` |
+| 🔵 Fedora | 40+ | `dnf` |
+| 🟠 Ubuntu LTS | 22.04, 24.04, 26.04 | `apt` |
 | 🔴 Debian | 12+ | `apt` |
 
 ---
@@ -282,8 +315,12 @@ chmod +x test/run-tests.sh
 # 🟠 Test on CentOS 10
 ./test/run-tests.sh centos10 modern
 
-# 🟣 Test on Ubuntu 24.04
+# 🔵 Test on Fedora
+./test/run-tests.sh fedora modern
+
+# 🟣 Test on Ubuntu 24.04 / 26.04
 ./test/run-tests.sh ubuntu2404 modern
+./test/run-tests.sh ubuntu2604 firewall
 
 # 🌍 Test all platforms
 ./test/run-tests.sh all info
@@ -331,7 +368,9 @@ curl -fsSLO https://raw.githubusercontent.com/anxuanzi/FTA-Server-Toolbox/main/f
 └── 🧪 test/
     ├── 🟠 Dockerfile.centos9    # CentOS 9 Stream test container
     ├── 🟠 Dockerfile.centos10   # CentOS 10 Stream test container
+    ├── 🔵 Dockerfile.fedora     # Fedora (latest) test container
     ├── 🟣 Dockerfile.ubuntu2404 # Ubuntu 24.04 LTS test container
+    ├── 🟣 Dockerfile.ubuntu2604 # Ubuntu 26.04 LTS test container
     └── 🏃 run-tests.sh          # Docker test runner
 ```
 

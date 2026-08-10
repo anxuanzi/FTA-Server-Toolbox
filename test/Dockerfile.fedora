@@ -1,0 +1,9 @@
+FROM fedora:latest
+
+RUN dnf install -y curl sudo which procps-ng util-linux findutils && dnf clean all
+
+COPY fta-toolbox.sh /root/fta-toolbox.sh
+RUN chmod +x /root/fta-toolbox.sh
+
+WORKDIR /root
+CMD ["/bin/bash"]

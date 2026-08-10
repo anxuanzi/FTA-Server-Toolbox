@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # =============================================================================
 # FTA Toolbox — Docker Test Runner
-# Usage: ./test/run-tests.sh [centos9|ubuntu2404|all] [module]
+# Usage: ./test/run-tests.sh [centos9|centos10|fedora|ubuntu2404|ubuntu2604|all] [module]
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+ALL_TARGETS=(centos9 centos10 fedora ubuntu2404 ubuntu2604)
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -55,29 +57,21 @@ TARGET="${1:-all}"
 MODULE="${2:-info}"
 
 case "$TARGET" in
-    centos9)
-        build_image "centos9" "Dockerfile.centos9"
-        run_test "centos9" "$MODULE"
-        ;;
-    centos10)
-        build_image "centos10" "Dockerfile.centos10"
-        run_test "centos10" "$MODULE"
-        ;;
-    ubuntu2404)
-        build_image "ubuntu2404" "Dockerfile.ubuntu2404"
-        run_test "ubuntu2404" "$MODULE"
+    centos9|centos10|fedora|ubuntu2404|ubuntu2604)
+        build_image "$TARGET" "Dockerfile.${TARGET}"
+        run_test "$TARGET" "$MODULE"
         ;;
     all)
-        build_image "centos9" "Dockerfile.centos9"
-        build_image "centos10" "Dockerfile.centos10"
-        build_image "ubuntu2404" "Dockerfile.ubuntu2404"
-        run_test "centos9" "$MODULE"
-        run_test "centos10" "$MODULE"
-        run_test "ubuntu2404" "$MODULE"
+        for t in "${ALL_TARGETS[@]}"; do
+            build_image "$t" "Dockerfile.${t}"
+        done
+        for t in "${ALL_TARGETS[@]}"; do
+            run_test "$t" "$MODULE"
+        done
         ;;
     *)
-        msg "Usage: $0 [centos9|centos10|ubuntu2404|all] [module]"
-        msg "Modules: info, update, network, modern, nodejs, docker, portainer, watchtower, security, tuning, timezone, swap, dns, full"
+        msg "Usage: $0 [centos9|centos10|fedora|ubuntu2404|ubuntu2604|all] [module]"
+        msg "Modules: info, update, network, modern, nodejs, docker, portainer, watchtower, security, tuning, timezone, swap, dns, firewall, full"
         exit 1
         ;;
 esac

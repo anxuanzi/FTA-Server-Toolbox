@@ -3,8 +3,9 @@
 # =============================================================================
 # Lint + syntax check runs first (fast gate). Integration tests run in Docker
 # containers using a matrix strategy:
-#   - Critical modules (info, modern, security, tuning) test on BOTH OSes
-#   - Secondary modules (update, network, timezone) test on Ubuntu only
+#   - Critical modules (info, modern, security, firewall, tuning) test across
+#     the primary OSes (centos9/10, fedora, ubuntu2404/2604)
+#   - Secondary modules (update, network, timezone) run as spot-checks
 # =============================================================================
 
 name: CI
@@ -57,23 +58,35 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Critical modules test on all 3 OSes; secondary modules on Ubuntu only.
+        # Critical modules test on all primary OSes; secondary modules spot-check.
         include:
-          # --- Critical modules: all 3 OSes ---
+          # --- Critical modules: all primary OSes ---
           - { os: centos9,    module: info,     dockerfile: test/Dockerfile.centos9    }
           - { os: centos10,   module: info,     dockerfile: test/Dockerfile.centos10   }
+          - { os: fedora,     module: info,     dockerfile: test/Dockerfile.fedora     }
           - { os: ubuntu2404, module: info,     dockerfile: test/Dockerfile.ubuntu2404 }
+          - { os: ubuntu2604, module: info,     dockerfile: test/Dockerfile.ubuntu2604 }
           - { os: centos9,    module: modern,   dockerfile: test/Dockerfile.centos9    }
           - { os: centos10,   module: modern,   dockerfile: test/Dockerfile.centos10   }
+          - { os: fedora,     module: modern,   dockerfile: test/Dockerfile.fedora     }
           - { os: ubuntu2404, module: modern,   dockerfile: test/Dockerfile.ubuntu2404 }
           - { os: centos9,    module: security, dockerfile: test/Dockerfile.centos9    }
           - { os: centos10,   module: security, dockerfile: test/Dockerfile.centos10   }
+          - { os: fedora,     module: security, dockerfile: test/Dockerfile.fedora     }
           - { os: ubuntu2404, module: security, dockerfile: test/Dockerfile.ubuntu2404 }
+          - { os: ubuntu2604, module: security, dockerfile: test/Dockerfile.ubuntu2604 }
+          - { os: centos9,    module: firewall, dockerfile: test/Dockerfile.centos9    }
+          - { os: centos10,   module: firewall, dockerfile: test/Dockerfile.centos10   }
+          - { os: fedora,     module: firewall, dockerfile: test/Dockerfile.fedora     }
+          - { os: ubuntu2404, module: firewall, dockerfile: test/Dockerfile.ubuntu2404 }
+          - { os: ubuntu2604, module: firewall, dockerfile: test/Dockerfile.ubuntu2604 }
           - { os: centos9,    module: tuning,   dockerfile: test/Dockerfile.centos9    }
           - { os: centos10,   module: tuning,   dockerfile: test/Dockerfile.centos10   }
+          - { os: fedora,     module: tuning,   dockerfile: test/Dockerfile.fedora     }
           - { os: ubuntu2404, module: tuning,   dockerfile: test/Dockerfile.ubuntu2404 }
-          # --- Secondary modules: Ubuntu only ---
+          # --- Secondary modules: spot-checks ---
           - { os: ubuntu2404, module: update,   dockerfile: test/Dockerfile.ubuntu2404 }
+          - { os: fedora,     module: update,   dockerfile: test/Dockerfile.fedora     }
           - { os: ubuntu2404, module: network,  dockerfile: test/Dockerfile.ubuntu2404 }
           - { os: ubuntu2404, module: timezone, dockerfile: test/Dockerfile.ubuntu2404 }
 

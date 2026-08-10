@@ -13,7 +13,7 @@
 # License:     Apache 2.0
 # Repository:  https://github.com/anxuanzi/FTA-Server-Toolbox
 # Supported:   CentOS Stream 9/10, RHEL 9/10, Rocky 9/10, AlmaLinux 9/10,
-#              Ubuntu 22.04/24.04 LTS, Debian 12
+#              Fedora 40+, Ubuntu 22.04/24.04/26.04 LTS, Debian 12
 # =============================================================================
 
 # --- Strict Mode (no set -e; we handle errors explicitly) ---
@@ -23,7 +23,7 @@ set -uo pipefail
 # SECTION 1: CONSTANTS & CONFIGURATION
 # =============================================================================
 
-readonly TOOLBOX_VERSION="2.3.1"
+readonly TOOLBOX_VERSION="2.4.0"
 readonly TOOLBOX_NAME="FTA Server Toolbox"
 readonly LOG_FILE="/var/log/fta-toolbox.log"
 readonly CONFIG_DIR="/root/.fta-toolbox"
@@ -377,7 +377,7 @@ detect_os() {
                 OS_FAMILY="debian"
             else
                 msg_err "Unsupported OS: $OS_PRETTY"
-                msg_info "Supported: CentOS/RHEL/Rocky/Alma 9-10, Ubuntu 22.04/24.04, Debian 12"
+                msg_info "Supported: CentOS/RHEL/Rocky/Alma 9-10, Fedora 40+, Ubuntu 22.04+, Debian 12"
                 exit 1
             fi
             ;;
@@ -387,15 +387,19 @@ detect_os() {
     case "$OS_FAMILY" in
         rhel)
             local major=${OS_VERSION%%.*}
-            if [[ "$major" -lt 9 ]]; then
+            if [[ "$OS_ID" == "fedora" ]]; then
+                if [[ "$major" -lt 40 ]]; then
+                    msg_warn "Fedora $OS_VERSION may not be fully supported (recommended: 40+)"
+                fi
+            elif [[ "$major" -lt 9 ]]; then
                 msg_warn "OS version $OS_VERSION may not be fully supported (recommended: 9+)"
             fi
             ;;
         debian)
             if [[ "$OS_ID" == "ubuntu" ]]; then
                 case "$OS_VERSION" in
-                    22.04|24.04|24.10) ;;
-                    *) msg_warn "Ubuntu $OS_VERSION may not be fully tested (recommended: 22.04/24.04)" ;;
+                    22.04|24.04|24.10|25.04|26.04) ;;
+                    *) msg_warn "Ubuntu $OS_VERSION may not be fully tested (recommended: 22.04/24.04/26.04)" ;;
                 esac
             elif [[ "$OS_ID" == "debian" ]]; then
                 local major=${OS_VERSION%%.*}
@@ -631,8 +635,8 @@ module_update_system() {
         msg_ok "System packages updated"
     fi
 
-    # --- EPEL Repository (RHEL family) ---
-    if [[ "$OS_FAMILY" == "rhel" ]]; then
+    # --- EPEL Repository (RHEL family; Fedora ships these packages natively) ---
+    if [[ "$OS_FAMILY" == "rhel" && "$OS_ID" != "fedora" ]]; then
         msg_step "Enabling EPEL repository..."
         if ! rpm -q epel-release &>/dev/null; then
             pkg_install epel-release && msg_ok "EPEL repository enabled" || msg_warn "Could not install EPEL"
@@ -983,20 +987,20 @@ module_nodejs() {
     # Let user choose version
     msg ""
     msg "  Available Node.js versions:"
-    msg "    ${CYAN}1${RESET}) Node.js 22 LTS  ${GREEN}(Recommended)${RESET}"
-    msg "    ${CYAN}2${RESET}) Node.js 20 LTS"
-    msg "    ${CYAN}3${RESET}) Node.js 24 (Latest)"
+    msg "    ${CYAN}1${RESET}) Node.js 24 LTS  ${GREEN}(Recommended)${RESET}"
+    msg "    ${CYAN}2${RESET}) Node.js 22 LTS"
+    msg "    ${CYAN}3${RESET}) Node.js 20  ${DIM}(EOL — not recommended)${RESET}"
     msg ""
 
-    local node_version="22"
+    local node_version="24"
     if [[ -n "$WIZARD_CFG_NODE_VER" ]]; then
         node_version="$WIZARD_CFG_NODE_VER"
     elif [[ "$AUTO_YES" != true ]]; then
         read -rp "  Select version [1]: " nv_choice
         case "${nv_choice:-1}" in
-            2) node_version="20" ;;
-            3) node_version="24" ;;
-            *) node_version="22" ;;
+            2) node_version="22" ;;
+            3) node_version="20" ;;
+            *) node_version="24" ;;
         esac
     fi
 
@@ -1091,8 +1095,12 @@ module_docker() {
     msg_step "Setting up Docker repository..."
     case "$OS_FAMILY" in
         rhel)
-            dnf install -y yum-utils &>/dev/null
-            dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo &>/dev/null
+            # Download the repo file directly — works on both dnf4 and dnf5
+            # (dnf5 on Fedora 41+ changed the config-manager --add-repo syntax)
+            local docker_repo_os="centos"
+            [[ "$OS_ID" == "fedora" ]] && docker_repo_os="fedora"
+            download_file "https://download.docker.com/linux/${docker_repo_os}/docker-ce.repo" \
+                /etc/yum.repos.d/docker-ce.repo
             dnf makecache -q &>/dev/null
             ;;
         debian)
@@ -1264,8 +1272,9 @@ module_security() {
 
     msg "  This module will:"
     msg "    • Harden SSH configuration"
-    msg "    • Configure firewall (firewalld/ufw)"
     msg "    • Install fail2ban"
+    msg ""
+    msg "  ${DIM}Firewall setup lives in the Firewall Management module (menu 14).${RESET}"
     msg ""
 
     if ! confirm "Apply security hardening?"; then
@@ -1276,15 +1285,6 @@ module_security() {
     # --- SSH Hardening ---
     if confirm "  Harden SSH configuration?"; then
         harden_ssh
-    fi
-
-    # --- Firewall ---
-    if ! is_container; then
-        if confirm "  Configure firewall?"; then
-            configure_firewall
-        fi
-    else
-        msg_info "Skipping firewall (container environment)"
     fi
 
     # --- fail2ban ---
@@ -1402,59 +1402,6 @@ ClientAliveCountMax 2
 
     msg_ok "SSH hardened"
     msg_warn "⚠  Ensure you have SSH key access before disconnecting!"
-}
-
-configure_firewall() {
-    if [[ "$DRY_RUN" == true ]]; then
-        msg_info "[DRY-RUN] Would configure firewall"
-        return 0
-    fi
-
-    msg_step "Configuring firewall..."
-
-    case "$OS_FAMILY" in
-        rhel)
-            # firewalld
-            if ! command_exists firewall-cmd; then
-                pkg_install firewalld
-            fi
-            systemctl start firewalld &>/dev/null
-            systemctl enable firewalld &>/dev/null
-
-            # Allow essential services
-            firewall-cmd --permanent --add-service=ssh &>/dev/null
-            firewall-cmd --permanent --add-service=http &>/dev/null
-            firewall-cmd --permanent --add-service=https &>/dev/null
-
-            # Allow Portainer if Docker is installed
-            if command_exists docker; then
-                firewall-cmd --permanent --add-port=9443/tcp &>/dev/null
-            fi
-
-            firewall-cmd --reload &>/dev/null
-            msg_ok "firewalld configured (SSH, HTTP, HTTPS allowed)"
-            msg_info "Add more rules: firewall-cmd --permanent --add-port=PORT/tcp"
-            ;;
-        debian)
-            # ufw
-            if ! command_exists ufw; then
-                pkg_install ufw
-            fi
-            ufw default deny incoming &>/dev/null
-            ufw default allow outgoing &>/dev/null
-            ufw allow ssh &>/dev/null
-            ufw allow http &>/dev/null
-            ufw allow https &>/dev/null
-
-            if command_exists docker; then
-                ufw allow 9443/tcp &>/dev/null
-            fi
-
-            echo "y" | ufw enable &>/dev/null
-            msg_ok "ufw configured (SSH, HTTP, HTTPS allowed)"
-            msg_info "Add more rules: ufw allow PORT/tcp"
-            ;;
-    esac
 }
 
 install_fail2ban() {
@@ -2055,7 +2002,430 @@ module_dns() {
 }
 
 # =============================================================================
-# SECTION 18: FULL AUTO SETUP WIZARD
+# SECTION 18: FIREWALL MANAGEMENT
+# =============================================================================
+
+# Unified firewall management for firewalld (RHEL family) and ufw (Debian
+# family).  One interface regardless of distro: status, open/close ports,
+# presets, enable/disable.  Every path that activates the firewall allows the
+# real SSH port first, so you can't lock yourself out.
+
+# Detect installed backend and whether it is running.
+# Sets: FW_BACKEND (firewalld|ufw|none), FW_ACTIVE (true|false)
+fw_detect_backend() {
+    FW_BACKEND="none"
+    FW_ACTIVE=false
+    if command_exists firewall-cmd; then
+        FW_BACKEND="firewalld"
+        systemctl is-active firewalld &>/dev/null && FW_ACTIVE=true
+    elif command_exists ufw; then
+        FW_BACKEND="ufw"
+        ufw status 2>/dev/null | grep -q "Status: active" && FW_ACTIVE=true
+    fi
+}
+
+# The distro-native backend to install when none is present.
+fw_native_backend() {
+    case "$OS_FAMILY" in
+        rhel)   echo "firewalld" ;;
+        debian) echo "ufw" ;;
+    esac
+}
+
+# Install the native backend if no backend exists yet.
+fw_ensure_backend() {
+    fw_detect_backend
+    if [[ "$FW_BACKEND" == "none" ]]; then
+        local native
+        native=$(fw_native_backend)
+        if [[ "$DRY_RUN" == true ]]; then
+            msg_info "[DRY-RUN] Would install $native"
+            return 0
+        fi
+        msg_step "Installing $native..."
+        pkg_install "$native"
+        fw_detect_backend
+        if [[ "$FW_BACKEND" == "none" ]]; then
+            msg_err "Could not install a firewall backend"
+            return 1
+        fi
+        msg_ok "$FW_BACKEND installed"
+    fi
+    return 0
+}
+
+# The port sshd actually listens on (sshd_config + drop-ins), default 22.
+fw_ssh_port() {
+    local port
+    port=$(cat /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null \
+        | awk 'tolower($1)=="port" {print $2; exit}')
+    [[ "$port" =~ ^[0-9]+$ ]] || port=22
+    echo "$port"
+}
+
+# firewalld prefers service names for well-known ports; map them.
+fw_port_service() {
+    case "$1" in
+        22/tcp)  echo "ssh" ;;
+        80/tcp)  echo "http" ;;
+        443/tcp) echo "https" ;;
+        *)       echo "" ;;
+    esac
+}
+
+# Normalize and validate "PORT" / "PORT/tcp" / "PORT/udp" → echoes "PORT/proto".
+fw_normalize_port() {
+    local spec=$1
+    [[ "$spec" == */* ]] || spec="${spec}/tcp"
+    if [[ ! "$spec" =~ ^([0-9]{1,5})/(tcp|udp)$ ]]; then
+        return 1
+    fi
+    local p=${BASH_REMATCH[1]}
+    (( p >= 1 && p <= 65535 )) || return 1
+    echo "$spec"
+}
+
+# Run a firewalld permanent-config command, online or offline.
+# When the daemon is running we also reload so the change applies immediately.
+fw_firewalld_cmd() {
+    if [[ "$FW_ACTIVE" == true ]]; then
+        firewall-cmd --permanent "$@" &>/dev/null
+        firewall-cmd --reload &>/dev/null
+    else
+        firewall-offline-cmd "$@" &>/dev/null
+    fi
+}
+
+fw_status() {
+    fw_detect_backend
+    msg ""
+    msg "  ${BOLD}Backend:${RESET}  ${FW_BACKEND}"
+    if [[ "$FW_BACKEND" == "none" ]]; then
+        msg_info "No firewall installed (firewalld/ufw not found)"
+        return 0
+    fi
+
+    if [[ "$FW_ACTIVE" == true ]]; then
+        msg "  ${BOLD}Status:${RESET}   ${GREEN}active${RESET}"
+    else
+        msg "  ${BOLD}Status:${RESET}   ${RED}inactive${RESET}"
+    fi
+
+    case "$FW_BACKEND" in
+        firewalld)
+            local services ports
+            if [[ "$FW_ACTIVE" == true ]]; then
+                services=$(firewall-cmd --list-services 2>/dev/null)
+                ports=$(firewall-cmd --list-ports 2>/dev/null)
+            else
+                services=$(firewall-offline-cmd --list-services 2>/dev/null)
+                ports=$(firewall-offline-cmd --list-ports 2>/dev/null)
+            fi
+            msg "  ${BOLD}Services:${RESET} ${services:-none}"
+            msg "  ${BOLD}Ports:${RESET}    ${ports:-none}"
+            ;;
+        ufw)
+            msg "  ${BOLD}Rules:${RESET}"
+            ufw status 2>/dev/null | tail -n +2 | grep -v '^$' | sed 's/^/    /' \
+                || msg "    (unable to read rules)"
+            ;;
+    esac
+    msg ""
+}
+
+fw_open_port() {
+    local spec
+    if ! spec=$(fw_normalize_port "$1"); then
+        msg_err "Invalid port: $1 (use PORT, PORT/tcp or PORT/udp)"
+        return 1
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+        msg_info "[DRY-RUN] Would open ${spec}"
+        return 0
+    fi
+
+    case "$FW_BACKEND" in
+        firewalld)
+            local service
+            service=$(fw_port_service "$spec")
+            if [[ -n "$service" ]]; then
+                fw_firewalld_cmd --add-service="$service"
+            else
+                fw_firewalld_cmd --add-port="$spec"
+            fi
+            ;;
+        ufw)
+            ufw allow "$spec" &>/dev/null
+            ;;
+    esac
+    msg_ok "Opened ${spec}"
+    [[ "$FW_ACTIVE" != true ]] && msg_info "Rule saved — firewall is not active yet"
+    return 0
+}
+
+fw_close_port() {
+    local spec
+    if ! spec=$(fw_normalize_port "$1"); then
+        msg_err "Invalid port: $1 (use PORT, PORT/tcp or PORT/udp)"
+        return 1
+    fi
+
+    # --- SSH lockout guard ---
+    local ssh_port
+    ssh_port=$(fw_ssh_port)
+    if [[ "$spec" == "${ssh_port}/tcp" ]]; then
+        if [[ "$AUTO_YES" == true || "$WIZARD_ACTIVE" == true ]]; then
+            msg_warn "Refusing to close SSH port ${ssh_port} in non-interactive mode"
+            return 1
+        fi
+        msg_warn "${spec} is your SSH port — closing it can lock you out of this server!"
+        local yn
+        read -rp "  Type 'yes' to close the SSH port anyway: " yn
+        if [[ "$yn" != "yes" ]]; then
+            msg_info "Cancelled"
+            return 0
+        fi
+    fi
+
+    if [[ "$DRY_RUN" == true ]]; then
+        msg_info "[DRY-RUN] Would close ${spec}"
+        return 0
+    fi
+
+    case "$FW_BACKEND" in
+        firewalld)
+            # Remove both the service alias and the raw port form
+            local service
+            service=$(fw_port_service "$spec")
+            [[ -n "$service" ]] && fw_firewalld_cmd --remove-service="$service"
+            fw_firewalld_cmd --remove-port="$spec"
+            ;;
+        ufw)
+            ufw delete allow "$spec" &>/dev/null
+            ;;
+    esac
+    msg_ok "Closed ${spec}"
+    return 0
+}
+
+fw_apply_preset() {
+    local preset=$1
+    case "$preset" in
+        web)
+            msg_step "Allowing HTTP (80/tcp) and HTTPS (443/tcp)..."
+            fw_open_port "80/tcp"
+            fw_open_port "443/tcp"
+            ;;
+        portainer)
+            msg_step "Allowing Portainer UI (9443/tcp) and edge tunnel (8000/tcp)..."
+            fw_open_port "9443/tcp"
+            fw_open_port "8000/tcp"
+            ;;
+    esac
+}
+
+fw_preset_menu() {
+    msg ""
+    msg "  ${BOLD}Presets:${RESET}"
+    msg "    ${CYAN}1${RESET}) Web server     (HTTP 80, HTTPS 443)"
+    msg "    ${CYAN}2${RESET}) Portainer      (9443, 8000)"
+    msg "    ${CYAN}0${RESET}) Back"
+    msg ""
+    local choice
+    read -rp "  Select preset: " choice
+    case "$choice" in
+        1) fw_apply_preset "web" ;;
+        2) fw_apply_preset "portainer" ;;
+        0) return 0 ;;
+        *) msg_warn "Invalid option: $choice" ;;
+    esac
+}
+
+fw_enable() {
+    fw_detect_backend
+    if [[ "$FW_ACTIVE" == true ]]; then
+        msg_info "Firewall is already active"
+        return 0
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+        msg_info "[DRY-RUN] Would enable ${FW_BACKEND} (keeping SSH open)"
+        return 0
+    fi
+
+    local ssh_port
+    ssh_port=$(fw_ssh_port)
+    msg_step "Enabling ${FW_BACKEND} (SSH port ${ssh_port} stays open)..."
+
+    case "$FW_BACKEND" in
+        firewalld)
+            # Allow SSH in permanent config BEFORE the daemon starts
+            fw_firewalld_cmd --add-service=ssh
+            [[ "$ssh_port" != "22" ]] && fw_firewalld_cmd --add-port="${ssh_port}/tcp"
+            systemctl enable firewalld &>/dev/null
+            systemctl start firewalld &>/dev/null
+            ;;
+        ufw)
+            ufw allow "${ssh_port}/tcp" &>/dev/null
+            ufw --force enable &>/dev/null
+            ;;
+    esac
+
+    fw_detect_backend
+    if [[ "$FW_ACTIVE" == true ]]; then
+        msg_ok "${FW_BACKEND} enabled"
+    else
+        msg_err "Failed to enable ${FW_BACKEND}"
+        return 1
+    fi
+}
+
+fw_disable() {
+    fw_detect_backend
+    if [[ "$FW_ACTIVE" != true ]]; then
+        msg_info "Firewall is already inactive"
+        return 0
+    fi
+    if ! confirm "Disable the firewall? The server will accept ALL incoming traffic" "N"; then
+        msg_info "Cancelled"
+        return 0
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+        msg_info "[DRY-RUN] Would disable ${FW_BACKEND}"
+        return 0
+    fi
+
+    case "$FW_BACKEND" in
+        firewalld)
+            systemctl stop firewalld &>/dev/null
+            systemctl disable firewalld &>/dev/null
+            ;;
+        ufw)
+            ufw disable &>/dev/null
+            ;;
+    esac
+    msg_warn "${FW_BACKEND} disabled — all incoming traffic is now allowed"
+}
+
+# Safe non-interactive setup: deny incoming, allow SSH/HTTP/HTTPS
+# (+ Portainer port when Docker is present), then enable.
+fw_apply_defaults() {
+    if [[ "$DRY_RUN" == true ]]; then
+        msg_info "[DRY-RUN] Would enable firewall with SSH/HTTP/HTTPS allowed"
+        return 0
+    fi
+
+    fw_ensure_backend || return 1
+
+    local ssh_port
+    ssh_port=$(fw_ssh_port)
+    msg_step "Applying safe defaults (deny incoming; allow SSH/HTTP/HTTPS)..."
+
+    case "$FW_BACKEND" in
+        firewalld)
+            fw_firewalld_cmd --add-service=ssh
+            [[ "$ssh_port" != "22" ]] && fw_firewalld_cmd --add-port="${ssh_port}/tcp"
+            fw_firewalld_cmd --add-service=http
+            fw_firewalld_cmd --add-service=https
+            if command_exists docker; then
+                fw_firewalld_cmd --add-port=9443/tcp
+            fi
+            systemctl enable firewalld &>/dev/null
+            systemctl start firewalld &>/dev/null
+            firewall-cmd --reload &>/dev/null
+            ;;
+        ufw)
+            ufw default deny incoming &>/dev/null
+            ufw default allow outgoing &>/dev/null
+            ufw allow "${ssh_port}/tcp" &>/dev/null
+            ufw allow 80/tcp &>/dev/null
+            ufw allow 443/tcp &>/dev/null
+            if command_exists docker; then
+                ufw allow 9443/tcp &>/dev/null
+            fi
+            ufw --force enable &>/dev/null
+            ;;
+    esac
+
+    fw_detect_backend
+    if [[ "$FW_ACTIVE" == true ]]; then
+        msg_ok "${FW_BACKEND} enabled — SSH(${ssh_port}), HTTP, HTTPS allowed"
+    else
+        msg_warn "${FW_BACKEND} configured but not active — enable it from the Firewall menu"
+    fi
+    return 0
+}
+
+fw_menu_loop() {
+    while true; do
+        fw_detect_backend
+        local state="${RED}inactive${RESET}"
+        [[ "$FW_ACTIVE" == true ]] && state="${GREEN}active${RESET}"
+        msg ""
+        msg "  ${BOLD}Firewall:${RESET} ${FW_BACKEND} (${state})"
+        msg ""
+        msg "    ${BOLD}1${RESET})  Show status & rules"
+        msg "    ${BOLD}2${RESET})  Open a port"
+        msg "    ${BOLD}3${RESET})  Close a port"
+        msg "    ${BOLD}4${RESET})  Apply preset (web / portainer)"
+        msg "    ${BOLD}5${RESET})  Enable firewall (keeps SSH open)"
+        msg "    ${BOLD}6${RESET})  Disable firewall"
+        msg "    ${BOLD}0${RESET})  Back to main menu"
+        msg ""
+        local choice port
+        read -rp "  Select an option: " choice
+        case "$choice" in
+            1) fw_status ;;
+            2)
+                read -rp "  Port to open (e.g. 8080 or 8080/udp): " port
+                [[ -n "$port" ]] && fw_open_port "$port"
+                ;;
+            3)
+                read -rp "  Port to close (e.g. 8080 or 8080/udp): " port
+                [[ -n "$port" ]] && fw_close_port "$port"
+                ;;
+            4) fw_preset_menu ;;
+            5) fw_enable ;;
+            6) fw_disable ;;
+            0|q|Q) return 0 ;;
+            *) msg_warn "Invalid option: $choice" ;;
+        esac
+    done
+}
+
+module_firewall() {
+    msg_header "🔥 Firewall Management"
+
+    if is_container; then
+        msg_warn "Running inside a container — firewall management is not available"
+        msg_info "Manage the firewall on the container host instead"
+        return 0
+    fi
+
+    # --- Backend bootstrap ---
+    fw_detect_backend
+    if [[ "$FW_BACKEND" == "none" ]]; then
+        msg_info "No firewall backend detected"
+        if confirm "Install $(fw_native_backend)?"; then
+            fw_ensure_backend || return 1
+        else
+            msg_info "Skipped"
+            return 0
+        fi
+    fi
+
+    # --- Non-interactive: apply safe defaults ---
+    if [[ "$AUTO_YES" == true || "$WIZARD_ACTIVE" == true ]]; then
+        fw_apply_defaults
+        return $?
+    fi
+
+    fw_status
+    fw_menu_loop
+    msg_done "Firewall management complete"
+}
+
+# =============================================================================
+# SECTION 19: FULL AUTO SETUP WIZARD
 # =============================================================================
 
 module_full_setup() {
@@ -2070,7 +2440,7 @@ module_full_setup() {
     # -------------------------------------------------------------------------
     # Core modules — included by default (Y)
     local do_update="Y" do_network="Y" do_modern="Y"
-    local do_security="Y" do_tuning="Y" do_timezone="Y" do_dns="Y"
+    local do_security="Y" do_firewall="Y" do_tuning="Y" do_timezone="Y" do_dns="Y"
     # Optional modules — NOT included by default (N)
     local do_nodejs="N" do_docker="N" do_portainer="N" do_watchtower="N" do_swap="N"
 
@@ -2082,6 +2452,7 @@ module_full_setup() {
         msg "    ✅ Network Diagnostic Tools"
         msg "    ✅ Modern CLI Tools"
         msg "    ✅ Security Hardening"
+        msg "    ✅ Firewall  (safe defaults)"
         msg "    ✅ Performance Tuning"
         msg "    ✅ Timezone & NTP  (UTC)"
         msg "    ✅ DNS Configuration  (Cloudflare)"
@@ -2103,6 +2474,7 @@ module_full_setup() {
         confirm "  🌐 Install network diagnostic tools?" && do_network="Y" || do_network="N"
         confirm "  🛠️  Install modern CLI tools?" && do_modern="Y" || do_modern="N"
         confirm "  🔒 Apply security hardening?" && do_security="Y" || do_security="N"
+        confirm "  🔥 Enable firewall (safe defaults: SSH/HTTP/HTTPS)?" && do_firewall="Y" || do_firewall="N"
         confirm "  ⚡ Apply performance tuning?" && do_tuning="Y" || do_tuning="N"
         confirm "  🕐 Configure timezone & NTP?" && do_timezone="Y" || do_timezone="N"
         confirm "  🌍 Configure DNS servers?" && do_dns="Y" || do_dns="N"
@@ -2180,14 +2552,14 @@ module_full_setup() {
         if [[ "$do_nodejs" == "Y" ]]; then
             msg ""
             msg "  ${BOLD}💚 Node.js Version:${RESET}"
-            msg "    ${CYAN}1${RESET}) Node.js 22 LTS  ${GREEN}(Recommended)${RESET}"
-            msg "    ${CYAN}2${RESET}) Node.js 20 LTS"
-            msg "    ${CYAN}3${RESET}) Node.js 24 (Latest)"
+            msg "    ${CYAN}1${RESET}) Node.js 24 LTS  ${GREEN}(Recommended)${RESET}"
+            msg "    ${CYAN}2${RESET}) Node.js 22 LTS"
+            msg "    ${CYAN}3${RESET}) Node.js 20  ${DIM}(EOL — not recommended)${RESET}"
             read -rp "    Select [1]: " nv_choice
             case "${nv_choice:-1}" in
-                2) WIZARD_CFG_NODE_VER="20" ;;
-                3) WIZARD_CFG_NODE_VER="24" ;;
-                *) WIZARD_CFG_NODE_VER="22" ;;
+                2) WIZARD_CFG_NODE_VER="22" ;;
+                3) WIZARD_CFG_NODE_VER="20" ;;
+                *) WIZARD_CFG_NODE_VER="24" ;;
             esac
             confirm "    Install yarn & pnpm?" && WIZARD_CFG_NODE_TOOLS="Y" || WIZARD_CFG_NODE_TOOLS="N"
         fi
@@ -2219,6 +2591,7 @@ module_full_setup() {
         [[ "$do_portainer" == "Y" ]]  && msg "    ✅ Portainer"                                                 || msg "    ⏭  Portainer"
         [[ "$do_watchtower" == "Y" ]] && msg "    ✅ Watchtower"                                                || msg "    ⏭  Watchtower"
         [[ "$do_security" == "Y" ]]   && msg "    ✅ Security"                                                  || msg "    ⏭  Security"
+        [[ "$do_firewall" == "Y" ]]   && msg "    ✅ Firewall  (safe defaults)"                                 || msg "    ⏭  Firewall"
         [[ "$do_tuning" == "Y" ]]    && msg "    ✅ Performance"                                               || msg "    ⏭  Performance"
         [[ "$do_timezone" == "Y" ]]  && msg "    ✅ Timezone  → ${WIZARD_CFG_TIMEZONE}"                        || msg "    ⏭  Timezone"
         [[ "$do_dns" == "Y" ]]       && msg "    ✅ DNS  → ${WIZARD_CFG_DNS1}${WIZARD_CFG_DNS2:+ / $WIZARD_CFG_DNS2}" || msg "    ⏭  DNS"
@@ -2246,6 +2619,7 @@ module_full_setup() {
     [[ "$do_portainer" == "Y" ]]  && ((total++))
     [[ "$do_watchtower" == "Y" ]] && ((total++))
     [[ "$do_security" == "Y" ]]   && ((total++))
+    [[ "$do_firewall" == "Y" ]]   && ((total++))
     [[ "$do_tuning" == "Y" ]]    && ((total++))
     [[ "$do_timezone" == "Y" ]]  && ((total++))
     [[ "$do_dns" == "Y" ]]       && ((total++))
@@ -2291,6 +2665,10 @@ module_full_setup() {
         ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Security Hardening ━━━${RESET}"
         module_security
     fi
+    if [[ "$do_firewall" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Firewall ━━━${RESET}"
+        module_firewall
+    fi
     if [[ "$do_tuning" == "Y" ]]; then
         ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Performance Tuning ━━━${RESET}"
         module_performance
@@ -2328,7 +2706,7 @@ module_full_setup() {
 }
 
 # =============================================================================
-# SECTION 19: SELF-UPDATE
+# SECTION 20: SELF-UPDATE
 # =============================================================================
 
 self_update() {
@@ -2375,7 +2753,7 @@ self_update() {
 }
 
 # =============================================================================
-# SECTION 20: MENU SYSTEM
+# SECTION 21: MENU SYSTEM
 # =============================================================================
 
 show_menu() {
@@ -2395,6 +2773,7 @@ show_menu() {
     msg "   ${BOLD}11${RESET})  🕐  Timezone & NTP"
     msg "   ${BOLD}12${RESET})  💾  Swap Management"
     msg "   ${BOLD}13${RESET})  🌍  DNS Configuration"
+    msg "   ${BOLD}14${RESET})  🔥  Firewall Management"
     msg ""
     msg "    ${DIM}─────────────────────────────────────${RESET}"
     msg "   ${BOLD}88${RESET})  🚀  ${GREEN}Full Auto Setup${RESET}"
@@ -2419,6 +2798,7 @@ handle_choice() {
         11) module_timezone ;;
         12) module_swap ;;
         13) module_dns ;;
+        14) module_firewall ;;
         88) module_full_setup ;;
         99) self_update ;;
         0|q|Q|exit)
@@ -2443,7 +2823,7 @@ menu_loop() {
 }
 
 # =============================================================================
-# SECTION 21: CLI ARGUMENT PARSING & MAIN
+# SECTION 22: CLI ARGUMENT PARSING & MAIN
 # =============================================================================
 
 show_help() {
@@ -2474,6 +2854,7 @@ show_help() {
     timezone         Configure timezone & NTP
     swap             Configure swap
     dns              Configure DNS servers
+    firewall         Manage firewall (firewalld/ufw)
     full             Run full setup wizard
 
   EXAMPLES:
@@ -2513,7 +2894,7 @@ main() {
                 DRY_RUN=true
                 shift
                 ;;
-            info|update|network|modern|nodejs|docker|portainer|watchtower|security|tuning|timezone|swap|dns|full)
+            info|update|network|modern|nodejs|docker|portainer|watchtower|security|tuning|timezone|swap|dns|firewall|full)
                 module="$1"
                 shift
                 ;;
@@ -2563,6 +2944,7 @@ main() {
             timezone)  module_timezone ;;
             swap)      module_swap ;;
             dns)       module_dns ;;
+            firewall)  module_firewall ;;
             full)      module_full_setup ;;
         esac
     else
