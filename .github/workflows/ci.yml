@@ -5,7 +5,7 @@
 # containers using a matrix strategy:
 #   - Critical modules (info, modern, security, firewall, tuning) test across
 #     the primary OSes (centos9/10, fedora, ubuntu2404/2604)
-#   - Secondary modules (update, network, timezone) run as spot-checks
+#   - Secondary modules (update, network, timezone, disk) run as spot-checks
 # =============================================================================
 
 name: CI
@@ -89,6 +89,8 @@ jobs:
           - { os: fedora,     module: update,   dockerfile: test/Dockerfile.fedora     }
           - { os: ubuntu2404, module: network,  dockerfile: test/Dockerfile.ubuntu2404 }
           - { os: ubuntu2404, module: timezone, dockerfile: test/Dockerfile.ubuntu2404 }
+          - { os: ubuntu2404, module: disk,     dockerfile: test/Dockerfile.ubuntu2404 }
+          - { os: centos9,    module: disk,     dockerfile: test/Dockerfile.centos9    }
 
     steps:
       - name: Checkout
