@@ -77,6 +77,7 @@ sudo ./fta-toolbox.sh --yes full
 | 7 | 🏗️ **Portainer** | Docker web UI for container management |
 | 8 | 👀 **Watchtower** | Automatic container image updates |
 | 12 | 💾 **Swap Management** | Create/resize swap file with smart size recommendation |
+| 15 | 💽 **Disk & Mount Manager** | Mount a data disk anywhere — e.g. move Docker volumes off the system disk — with verified copy & rollback ([see below](#-disk--mount-manager)) |
 
 > 💡 **Tip:** In `--yes full` mode, only core modules run. Install optional services individually:
 > ```bash
@@ -125,7 +126,7 @@ The interactive menu lets you pick any module:
 
 ```
   ┌──────────────────────────────────────────────────────┐
-  │       🧰 FTA Server Toolbox v2.4.0                  │
+  │       🧰 FTA Server Toolbox v2.5.0                  │
   │       Ubuntu 24.04 LTS • x86_64                     │
   └──────────────────────────────────────────────────────┘
 
@@ -143,6 +144,7 @@ The interactive menu lets you pick any module:
    12)  💾  Swap Management
    13)  🌍  DNS Configuration
    14)  🔥  Firewall Management
+   15)  💽  Disk & Mount Manager
     ─────────────────────────────────────
    88)  🚀  Full Auto Setup
    99)  📦  Self-Update Script
@@ -174,7 +176,7 @@ sudo ./fta-toolbox.sh info
 ### 📦 Available Module Names
 
 ```
-info · update · network · modern · nodejs · docker · portainer · watchtower · security · tuning · timezone · swap · dns · firewall · full
+info · update · network · modern · nodejs · docker · portainer · watchtower · security · tuning · timezone · swap · dns · firewall · disk · full
 ```
 
 ---
@@ -230,6 +232,76 @@ One interface for both firewall backends — you never have to remember `firewal
 # Safe defaults: deny incoming, allow SSH/HTTP/HTTPS (+ 9443 if Docker), enable
 sudo ./fta-toolbox.sh --yes firewall
 ```
+
+---
+
+## 💽 Disk & Mount Manager
+
+Attach a data disk and mount it exactly where you need it — the classic case is putting `/var/lib/docker/volumes` on its own disk so all Docker volumes live there while the OS stays on the system disk. If the target folder already holds data, it is **moved onto the disk safely** — no manual rsync/fstab/systemd juggling.
+
+### 🖥️ Interactive menu
+
+```
+    1)  Show disks & mounts
+    2)  Mount a disk (move a folder like Docker volumes onto it)
+    3)  Unmount a data disk
+    4)  Grow a filesystem (after enlarging the disk)
+    5)  Clean up migration backups
+    0)  Back to main menu
+```
+
+"Mount a disk" is a 4-step guided flow — **pick a disk → pick a target → filesystem → services** — followed by a plan you approve before anything changes:
+
+```
+  ┌─ Plan ─────────────────────────────────────────────────
+  │  Disk         /dev/sdb  (200G)
+  │  Currently    mounted at /mnt/data → will be retired
+  │  Filesystem   keep existing xfs filesystem (UUID 61e2…)
+  │  Mount at     /var/lib/docker/volumes
+  │  Data         3.2G to copy (hot rsync, then a short cold delta pass)
+  │  Old copy     kept as /var/lib/docker/volumes.fta-bak-<timestamp>
+  │  Services     docker.socket docker.service containerd.service
+  │  fstab        UUID=… /var/lib/docker/volumes xfs defaults,nofail 0 0
+  │  Boot order   docker.service waits for the mount (systemd drop-in)
+  └────────────────────────────────────────────────────────
+```
+
+**Target presets:** Docker volumes · Docker data root · `/home` · `/data` · any custom path.
+**Disk can be:** a blank disk (formatted as **xfs** or ext4), an unmounted disk with a filesystem (keep or reformat), or a disk already mounted somewhere like `/mnt/data` (its old mount is retired).
+
+### 🔁 What a migration does
+
+1. 📦 Installs `rsync` / `xfsprogs` if missing; formats the disk if requested
+2. 🔥 **Hot copy** with `rsync -aHAXx --numeric-ids` while services keep running (keeps permissions, owners, hardlinks, ACLs, xattrs/SELinux labels)
+3. ⏸️ Stops the dependent services, runs a short **cold delta** pass, then **verifies** the disk matches the source
+4. 🔀 Moves the original folder aside to `<dir>.fta-bak-<timestamp>` (instant rename, nothing deleted)
+5. 📝 Writes `/etc/fstab` by **UUID** with `nofail` (your server still boots if the disk goes missing) and mounts from fstab to prove the entry works
+6. 🏷️ Restores SELinux labels (RHEL family), adds a systemd drop-in so services **wait for the mount at boot** (`RequiresMountsFor` + `ConditionPathIsMountPoint` — Docker never silently writes to the system disk), and restarts the services
+
+### 🛡️ Safety
+
+- ↩️ **Automatic rollback** — any failure before the new mount is live (copy error, busy mount, bad fstab entry, Ctrl-C) puts fstab, the original folder, the old mount and the services back exactly as they were
+- ⌨️ **Erase guard** — formatting a disk that has any filesystem/partition signature requires typing the device name; it is refused outright in `--yes` mode (only truly blank disks are auto-formatted)
+- 🚫 Refuses system disks and paths (`/`, `/etc`, `/usr`, `/var`, `/boot`…), disks with partitions, LVM/RAID members, swap, and targets that are already mounts
+- 📏 Checks free space and XFS `ftype=1` (required by Docker's overlay2) before copying
+- 🧹 Backups are kept until you remove them via **Clean up migration backups** (the menu shows how many are pending)
+
+### 🤖 Non-interactive mode
+
+```bash
+# Move Docker volumes onto a disk that is currently mounted at /mnt/data
+sudo ./fta-toolbox.sh --yes disk /mnt/data /var/lib/docker/volumes
+
+# Format a blank disk as xfs and mount it at /data
+sudo ./fta-toolbox.sh --yes disk /dev/sdb /data xfs
+
+# Preview the plan without changing anything
+sudo ./fta-toolbox.sh --dry-run disk /dev/sdb /var/lib/docker/volumes
+```
+
+Usage: `disk [SOURCE TARGET [xfs|ext4|keep]]` — `SOURCE` is a device (`/dev/sdb`) or a mounted path. With no arguments, `--yes disk` just prints the overview.
+
+> 💡 In the **Full Setup wizard**, the data disk step is offered when a free disk is attached, and it runs *before* Docker so a fresh install writes straight to the data disk.
 
 ---
 

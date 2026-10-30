@@ -23,13 +23,14 @@ set -uo pipefail
 # SECTION 1: CONSTANTS & CONFIGURATION
 # =============================================================================
 
-readonly TOOLBOX_VERSION="2.4.0"
+readonly TOOLBOX_VERSION="2.5.0"
 readonly TOOLBOX_NAME="FTA Server Toolbox"
 readonly LOG_FILE="/var/log/fta-toolbox.log"
 readonly CONFIG_DIR="/root/.fta-toolbox"
 readonly LOCK_FILE="/tmp/fta-toolbox.lock"
 readonly GITHUB_REPO="anxuanzi/FTA-Server-Toolbox"
 readonly SELF_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/main/fta-toolbox.sh"
+readonly DISK_REGISTRY="${CONFIG_DIR}/disk-migrations.log"   # disk module history
 
 BACKUP_DIR=""
 TMP_DIR=""
@@ -44,6 +45,12 @@ WIZARD_CFG_DNS2=""        # secondary DNS server
 WIZARD_CFG_NODE_VER=""    # e.g., "20", "22", "24"
 WIZARD_CFG_NODE_TOOLS=""  # "Y" or "N" — install yarn/pnpm
 WIZARD_CFG_SWAP_SIZE=""   # e.g., "2G", "4G"
+WIZARD_CFG_DISK_SRC=""    # e.g., "/dev/sdb" — data disk to mount
+WIZARD_CFG_DISK_TARGET="" # e.g., "/var/lib/docker/volumes"
+WIZARD_CFG_DISK_FS=""     # "keep", "xfs" or "ext4"
+
+# Positional arguments for the disk module (fta-toolbox.sh disk SRC TARGET [FS])
+DISK_ARGS=()
 
 # Architecture detection
 ARCH=$(uname -m)
@@ -2425,7 +2432,1313 @@ module_firewall() {
 }
 
 # =============================================================================
-# SECTION 19: FULL AUTO SETUP WIZARD
+# SECTION 19: DISK & MOUNT MANAGER
+# =============================================================================
+
+# Mount a data disk anywhere — most often to move a busy directory such as
+# /var/lib/docker/volumes off the system disk.  Existing data is copied with
+# a two-pass rsync (hot pass while services run, short cold pass with them
+# stopped) and verified, the old directory is kept as a backup, the disk is
+# mounted by UUID with nofail, and systemd drop-ins make dependent services
+# wait for the mount at boot.  Any failure before the new mount is live rolls
+# everything back.  Helpers are prefixed disk_.
+
+# Paths that must never become (or be hidden by) a mount.
+disk_is_system_path() {
+    case "$1" in
+        /|/bin|/boot|/dev|/etc|/lib|/lib32|/lib64|/libx32|/proc|/root|/run|/sbin|/snap|/sys|/tmp|/usr|/var|/var/lib|/var/run|/var/tmp)
+            return 0 ;;
+        /bin/*|/boot/*|/dev/*|/etc/*|/lib/*|/lib32/*|/lib64/*|/libx32/*|/proc/*|/run/*|/sbin/*|/sys/*|/usr/*|/var/run/*)
+            return 0 ;;
+    esac
+    return 1
+}
+
+# Filesystems we can keep as-is (they support Linux permissions/xattrs).
+disk_fs_supported() {
+    case "$1" in
+        xfs|ext4|ext3|ext2|btrfs) return 0 ;;
+    esac
+    return 1
+}
+
+disk_human() {
+    numfmt --to=iec "${1:-0}" 2>/dev/null || echo "${1:-0} bytes"
+}
+
+# One lsblk column for one device (no children), trimmed.
+disk_attr() {
+    local v
+    v=$(lsblk -dno "$2" "$1" 2>/dev/null | head -1 | sed 's/^ *//;s/ *$//')
+    # lsblk reads FSTYPE from udev; probe the device directly when udev has no answer
+    if [[ -z "$v" && "$2" == FSTYPE ]]; then
+        v=$(blkid -p -s TYPE -o value "$1" 2>/dev/null)
+        [[ -z "$v" ]] && v=$(findmnt -rno FSTYPE -S "$1" 2>/dev/null | head -1)
+    fi
+    echo "$v"
+}
+
+# Pad to a visible width (printf pads bytes, which breaks on emoji/box glyphs).
+disk_pad() {
+    local s=$1 w=$2
+    printf '%s%*s' "$s" $(( w > ${#s} ? w - ${#s} : 0 )) ''
+}
+
+# All mountpoints of a block device, one per line.
+disk_mounts_of() {
+    local m
+    while read -r m; do
+        [[ -n "$m" ]] && printf '%b\n' "$m"
+    done < <(findmnt -rno TARGET -S "$1" 2>/dev/null)
+}
+
+# Classify a block device.  Echoes one of:
+#   blank | free | mounted:<path under /mnt or /media> | busy:<reason>
+disk_dev_state() {
+    local dev=$1 fstype children mounts m
+    children=$(lsblk -no NAME "$dev" 2>/dev/null | wc -l)
+    if (( children > 1 )); then
+        echo "busy:has partitions/volumes"
+        return
+    fi
+    fstype=$(disk_attr "$dev" FSTYPE)
+    case "$fstype" in
+        swap)              echo "busy:swap"; return ;;
+        LVM2_member)       echo "busy:LVM physical volume"; return ;;
+        crypto_LUKS)       echo "busy:encrypted (locked)"; return ;;
+        linux_raid_member) echo "busy:RAID member"; return ;;
+        zfs_member)        echo "busy:ZFS member"; return ;;
+        iso9660|udf|squashfs) echo "busy:read-only media"; return ;;
+    esac
+    mounts=$(disk_mounts_of "$dev")
+    if [[ -z "$mounts" ]]; then
+        [[ -z "$fstype" ]] && echo "blank" || echo "free"
+        return
+    fi
+    while read -r m; do
+        case "$m" in
+            /mnt/*|/media/*) ;;
+            *) echo "busy:mounted at $m"; return ;;
+        esac
+    done <<< "$mounts"
+    echo "mounted:$(head -1 <<< "$mounts")"
+}
+
+# Colored, human description of a state from disk_dev_state.
+disk_state_label() {
+    local state=$1 fstype=${2:-unknown fs}
+    case "$state" in
+        blank)     echo "${GREEN}● available${RESET} ${DIM}(blank — will be formatted)${RESET}" ;;
+        free)      echo "${GREEN}● available${RESET} ${DIM}(${fstype}, not mounted)${RESET}" ;;
+        mounted:*) echo "${GREEN}● available${RESET} ${DIM}(${fstype}, mounted at ${state#mounted:})${RESET}" ;;
+        busy:mounted\ at\ *)
+            local m=${state#busy:mounted at }
+            if disk_is_system_path "$m" || [[ "$m" == "[SWAP]" ]]; then
+                echo "${DIM}system  ${m}${RESET}"
+            else
+                echo "${BLUE}◆ data mount${RESET}  ${m}"
+            fi
+            ;;
+        busy:*)    echo "${DIM}${state#busy:}${RESET}" ;;
+    esac
+}
+
+# Real block devices worth showing (no loop/rom/zram), in tree order.
+# Echoes "NAME DEPTH" lines.
+disk_list_devices() {
+    local name type pk
+    declare -A depth=()
+    while read -r name type pk; do
+        case "$type" in loop|rom) continue ;; esac
+        case "$name" in /dev/zram*|/dev/ram*|/dev/nbd*) continue ;; esac
+        local d=0
+        [[ -n "$pk" && -n "${depth[$pk]:-}" ]] && d=$(( depth[$pk] + 1 ))
+        depth[$name]=$d
+        echo "$name $d"
+    done < <(lsblk -rpno NAME,TYPE,PKNAME 2>/dev/null)
+}
+
+# Fill DISK_CANDIDATES with devices that can be selected.
+disk_collect_candidates() {
+    DISK_CANDIDATES=()
+    local name depth state
+    while read -r name depth; do
+        state=$(disk_dev_state "$name")
+        case "$state" in
+            blank|free|mounted:*) DISK_CANDIDATES+=("$name") ;;
+        esac
+    done < <(disk_list_devices | awk '!seen[$1]++')
+}
+
+# fstab entries that are data mounts (not system paths, not swap).
+# Echoes "TARGET SOURCE FSTYPE" lines.
+disk_list_data_mounts() {
+    local t s f
+    while read -r t s f; do
+        t=$(printf '%b' "$t")
+        [[ "$f" == "swap" || "$t" != /* ]] && continue
+        disk_is_system_path "$t" && continue
+        echo "$t $s $f"
+    done < <(findmnt --fstab -rno TARGET,SOURCE,FSTYPE 2>/dev/null)
+}
+
+# Pre-migration backups still on disk.  Echoes "BACKUP|TARGET|DATE" lines.
+disk_list_backups() {
+    [[ -f "$DISK_REGISTRY" ]] || return 0
+    local d dev uuid fs target backup
+    while IFS='|' read -r d dev uuid fs target backup; do
+        [[ -n "$backup" && -d "$backup" ]] && echo "${backup}|${target}|${d}"
+    done < "$DISK_REGISTRY" | awk -F'|' '!seen[$1]++'
+}
+
+disk_show_overview() {
+    msg "  ${BOLD}Block devices:${RESET}"
+    msg ""
+    printf "    ${DIM}%-28s %7s  %-5s  %-11s %s${RESET}\n" "DEVICE" "SIZE" "TYPE" "FS" "STATUS"
+    local name depth type size fstype state indent
+    while read -r name depth; do
+        type=$(disk_attr "$name" TYPE)
+        size=$(disk_attr "$name" SIZE)
+        fstype=$(disk_attr "$name" FSTYPE)
+        state=$(disk_dev_state "$name")
+        indent=""
+        (( depth > 0 )) && indent="$(printf '%*s' $(( (depth - 1) * 2 )) '')└ "
+        printf "    %s %7s  %-5s  %-11s %b\n" "$(disk_pad "${indent}${name}" 28)" "$size" "$type" "${fstype:--}" \
+            "$(disk_state_label "$state" "$fstype")"
+    done < <(disk_list_devices)
+
+    msg ""
+    msg "  ${BOLD}Data mounts (fstab):${RESET}"
+    local t s f found=false usage
+    while read -r t s f; do
+        found=true
+        if mountpoint -q "$t" 2>/dev/null; then
+            usage=$(df -h --output=used,size,pcent "$t" 2>/dev/null | tail -1 | awk '{print $1 " / " $2 " (" $3 ")"}')
+            msg "    ${GREEN}●${RESET} ${BOLD}${t}${RESET}  ${DIM}${s} · ${f} · ${usage}${RESET}"
+        else
+            msg "    ${RED}●${RESET} ${BOLD}${t}${RESET}  ${DIM}${s} · ${f} ·${RESET} ${RED}not mounted${RESET}"
+        fi
+    done < <(disk_list_data_mounts)
+    [[ "$found" == false ]] && msg "    ${DIM}none${RESET}"
+
+    local nb
+    nb=$(disk_list_backups | wc -l)
+    if (( nb > 0 )); then
+        msg ""
+        msg_warn "${nb} pre-migration backup(s) still use space on the system disk — see 'Clean up migration backups'"
+    fi
+    msg ""
+}
+
+# --- Resolution & validation ---
+
+# Resolve a device path or a mounted directory.
+# Sets DS_DEV DS_FSTYPE DS_UUID DS_SIZE DS_BYTES DS_MOUNT DS_STATE.
+disk_resolve_source() {
+    local input=$1
+    [[ "$input" != "/" ]] && input=${input%/}
+    DS_DEV="" DS_MOUNT="" DS_STATE=""
+    if [[ -b "$input" ]]; then
+        DS_DEV=$input
+    elif [[ -d "$input" ]] && mountpoint -q "$input"; then
+        DS_DEV=$(findmnt -no SOURCE --mountpoint "$input" 2>/dev/null | head -1 | sed 's/\[.*\]$//')
+        if [[ ! -b "$DS_DEV" ]]; then
+            msg_err "$input is not backed by a local block device (${DS_DEV:-unknown})"
+            return 1
+        fi
+    else
+        msg_err "Not a block device or a mountpoint: ${input:-<empty>}"
+        return 1
+    fi
+    # Canonical lsblk name (e.g. /dev/mapper/vg-data rather than /dev/dm-3)
+    local canon
+    canon=$(lsblk -dnpo NAME "$(readlink -f "$DS_DEV")" 2>/dev/null | head -1)
+    [[ -n "$canon" ]] && DS_DEV=$canon
+
+    DS_STATE=$(disk_dev_state "$DS_DEV")
+    case "$DS_STATE" in
+        blank|free) ;;
+        mounted:*) DS_MOUNT=${DS_STATE#mounted:} ;;
+        busy:mounted\ at\ *)
+            local m=${DS_STATE#busy:mounted at }
+            if disk_is_system_path "$m" || [[ "$m" == "[SWAP]" ]]; then
+                msg_err "$DS_DEV is a system device (mounted at $m) — refusing to touch it"
+                return 1
+            fi
+            if (( $(disk_mounts_of "$DS_DEV" | wc -l) > 1 )); then
+                msg_err "$DS_DEV is mounted in several places — unmount the extras first"
+                return 1
+            fi
+            DS_MOUNT=$m
+            msg_warn "$DS_DEV is currently mounted at $m — that mount will be moved"
+            ;;
+        busy:*)
+            msg_err "$DS_DEV can't be used: ${DS_STATE#busy:}"
+            [[ "$DS_STATE" == "busy:has partitions/volumes" ]] && msg_info "Pick one of its partitions/volumes instead"
+            return 1
+            ;;
+    esac
+    DS_FSTYPE=$(disk_attr "$DS_DEV" FSTYPE)
+    DS_UUID=$(blkid -c /dev/null -s UUID -o value "$DS_DEV" 2>/dev/null)
+    DS_SIZE=$(disk_attr "$DS_DEV" SIZE)
+    DS_BYTES=$(lsblk -bdno SIZE "$DS_DEV" 2>/dev/null | head -1 | tr -d ' ')
+    if [[ -n "$DS_MOUNT" ]] && ! disk_fs_supported "$DS_FSTYPE"; then
+        msg_err "$DS_DEV is mounted with ${DS_FSTYPE:-an unknown filesystem}, which can't hold Linux permissions"
+        msg_info "Unmount it first, then it can be reformatted"
+        return 1
+    fi
+    return 0
+}
+
+# Validate the mount target.  Sets DT_PATH.
+disk_resolve_target() {
+    local t=$1
+    if [[ "$t" != /* ]]; then
+        msg_err "Target must be an absolute path (got: ${t:-<empty>})"
+        return 1
+    fi
+    if [[ "$t" =~ [[:space:]] ]]; then
+        msg_err "Target paths with spaces are not supported"
+        return 1
+    fi
+    [[ "$t" != "/" ]] && t=${t%/}
+    if [[ -L "$t" ]]; then
+        msg_err "$t is a symlink — point at the real directory ($(readlink -f "$t"))"
+        return 1
+    fi
+    t=$(realpath -m "$t")
+    if disk_is_system_path "$t"; then
+        msg_err "$t is a system path — mounting over it would break the OS"
+        return 1
+    fi
+    if [[ -e "$t" && ! -d "$t" ]]; then
+        msg_err "$t exists but is not a directory"
+        return 1
+    fi
+    if mountpoint -q "$t" 2>/dev/null; then
+        msg_err "$t is already a mountpoint ($(findmnt -no SOURCE --mountpoint "$t" | head -1))"
+        msg_info "Use 'Unmount a data disk' first if you want to replace it"
+        return 1
+    fi
+    local nested
+    nested=$(findmnt -rno TARGET,FSTYPE 2>/dev/null | awk -v p="$t/" \
+        'index($1, p) == 1 && $2 !~ /^(overlay|tmpfs|nsfs|shm|proc|sysfs|fuse.*)$/ {print $1}')
+    if [[ -n "$nested" ]]; then
+        msg_err "$t contains other mounts — unmount them first:"
+        msg "    ${nested//$'\n'/$'\n'    }"
+        return 1
+    fi
+    DT_PATH=$t
+    return 0
+}
+
+# Source and target must not contain each other.
+disk_check_pair() {
+    [[ -z "$DS_MOUNT" ]] && return 0
+    if [[ "$DT_PATH/" == "$DS_MOUNT/"* || "$DS_MOUNT/" == "$DT_PATH/"* ]]; then
+        msg_err "$DT_PATH and the disk's current mount ($DS_MOUNT) overlap — pick another target"
+        return 1
+    fi
+    return 0
+}
+
+# Services that write to well-known paths and must pause during the switch.
+disk_units_for() {
+    case "$1" in
+        /var/lib/docker|/var/lib/docker/*|/var/lib/containerd|/var/lib/containerd/*)
+            echo "docker.socket docker.service containerd.service" ;;
+        /var/lib/mysql|/var/lib/mysql/*)   echo "mysqld.service mariadb.service mysql.service" ;;
+        /var/lib/pgsql*|/var/lib/postgresql*) echo "postgresql.service" ;;
+        /var/www|/var/www/*)               echo "nginx.service httpd.service apache2.service" ;;
+        /var/lib/libvirt|/var/lib/libvirt/*) echo "libvirtd.service" ;;
+    esac
+}
+
+disk_unit_exists() {
+    [[ -n "$(systemctl list-unit-files --no-legend "$1" 2>/dev/null)" ]]
+}
+
+# --- Interactive pickers (set DISK_PICK; return 1 on cancel) ---
+
+disk_pick_source() {
+    disk_collect_candidates
+    msg ""
+    msg "  ${BOLD}${CYAN}Step 1/4 — Choose the disk${RESET}"
+    msg ""
+    local i=1 dev
+    if (( ${#DISK_CANDIDATES[@]} == 0 )); then
+        msg_warn "No free disks found — attach a new disk to this machine, or enter one manually"
+    fi
+    for dev in "${DISK_CANDIDATES[@]}"; do
+        local fstype size state
+        fstype=$(disk_attr "$dev" FSTYPE)
+        size=$(disk_attr "$dev" SIZE)
+        state=$(disk_dev_state "$dev")
+        printf "    ${CYAN}%2d${RESET}) %-22s %7s  %b\n" "$i" "$dev" "$size" "$(disk_state_label "$state" "$fstype")"
+        i=$((i + 1))
+    done
+    msg "     ${CYAN}m${RESET}) Enter a device or mounted path manually"
+    msg "     ${CYAN}0${RESET}) Cancel"
+    msg ""
+    local choice default=""
+    (( ${#DISK_CANDIDATES[@]} == 1 )) && default=1
+    while true; do
+        read -rp "  Select disk${default:+ [$default]}: " choice
+        choice=${choice:-$default}
+        case "$choice" in
+            0|q|Q) msg_info "Cancelled"; return 1 ;;
+            m|M)
+                read -rp "  Device (e.g. /dev/sdb) or mounted path (e.g. /mnt/data): " DISK_PICK
+                [[ -n "$DISK_PICK" ]] && return 0
+                ;;
+            *)
+                if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#DISK_CANDIDATES[@]} )); then
+                    DISK_PICK=${DISK_CANDIDATES[$((choice - 1))]}
+                    return 0
+                fi
+                msg_warn "Invalid choice: ${choice:-<empty>}"
+                ;;
+        esac
+    done
+}
+
+disk_pick_target() {
+    local -a paths=(/var/lib/docker/volumes /var/lib/docker /home /data)
+    local -a names=("🐳 Docker volumes" "🐳 Docker data root" "🏠 Home directories" "📁 Data directory")
+    local -a notes=("named volumes only — images stay on the system disk"
+                    "images, containers and volumes"
+                    "user home directories"
+                    "general-purpose /data")
+    msg ""
+    msg "  ${BOLD}${CYAN}Step 2/4 — Where should the disk be mounted?${RESET}"
+    msg ""
+    local i p hint
+    for i in "${!paths[@]}"; do
+        p=${paths[$i]}
+        if mountpoint -q "$p" 2>/dev/null; then
+            hint="${DIM}already a mount${RESET}"
+        elif [[ -d "$p" && -n "$(ls -A "$p" 2>/dev/null)" ]]; then
+            hint="${YELLOW}has data — will be moved${RESET}"
+        else
+            hint="${DIM}${notes[$i]}${RESET}"
+        fi
+        printf "    ${CYAN}%2d${RESET}) %s %-26s %b\n" "$((i + 1))" "$(disk_pad "${names[$i]}" 21)" "$p" "$hint"
+    done
+    msg "     ${CYAN}c${RESET}) ✏️  Custom path"
+    msg "     ${CYAN}0${RESET}) Cancel"
+    msg ""
+    local choice
+    while true; do
+        read -rp "  Select target [1]: " choice
+        choice=${choice:-1}
+        case "$choice" in
+            0|q|Q) msg_info "Cancelled"; return 1 ;;
+            c|C)
+                read -rp "  Absolute path (e.g. /srv/backups): " DISK_PICK
+                [[ -n "$DISK_PICK" ]] && return 0
+                ;;
+            *)
+                if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#paths[@]} )); then
+                    DISK_PICK=${paths[$((choice - 1))]}
+                    return 0
+                fi
+                msg_warn "Invalid choice: $choice"
+                ;;
+        esac
+    done
+}
+
+# Decide whether the disk gets formatted.  Sets DP_FORMAT (true|false), DP_FS.
+#   $1  preference: "" (ask/default) | keep | xfs | ext4
+#   $2  true if erasing was already approved (wizard collected it upfront)
+disk_plan_format() {
+    local want=${1:-} preapproved=${2:-false}
+    local interactive=true
+    [[ "$AUTO_YES" == true || "$WIZARD_ACTIVE" == true ]] && interactive=false
+    case "$want" in
+        ""|keep|xfs|ext4) ;;
+        *) msg_err "Unsupported filesystem: $want (use xfs or ext4)"; return 1 ;;
+    esac
+    DP_FORMAT=false
+    DP_FS=$DS_FSTYPE
+
+    local choice
+    if disk_fs_supported "$DS_FSTYPE"; then
+        # --- Existing Linux filesystem ---
+        if [[ -n "$DS_MOUNT" ]]; then
+            [[ "$want" == xfs || "$want" == ext4 ]] && [[ "$want" != "$DS_FSTYPE" ]] && \
+                msg_warn "$DS_DEV is mounted — keeping its $DS_FSTYPE filesystem"
+            if [[ "$interactive" == true && -z "$want" ]]; then
+                msg ""
+                msg "  ${BOLD}${CYAN}Step 3/4 — Filesystem${RESET}"
+                msg ""
+                msg "  Keeping the existing ${BOLD}${DS_FSTYPE}${RESET} filesystem ${DIM}(the disk is in use, so it won't be reformatted)${RESET}"
+            fi
+            want=keep
+        elif [[ -z "$want" ]]; then
+            want=keep
+            if [[ "$interactive" == true ]]; then
+                msg ""
+                msg "  ${BOLD}${CYAN}Step 3/4 — Filesystem${RESET}"
+                msg ""
+                msg "  $DS_DEV already has a ${BOLD}${DS_FSTYPE}${RESET} filesystem."
+                msg "    ${CYAN}1${RESET}) Keep it and the data on it  ${GREEN}(safe)${RESET}"
+                msg "    ${CYAN}2${RESET}) Reformat as xfs   ${RED}— erases the disk${RESET}"
+                msg "    ${CYAN}3${RESET}) Reformat as ext4  ${RED}— erases the disk${RESET}"
+                read -rp "  Select [1]: " choice
+                case "${choice:-1}" in
+                    2) want=xfs ;;
+                    3) want=ext4 ;;
+                esac
+            fi
+        fi
+    else
+        # --- Blank disk or a filesystem Linux data can't live on ---
+        if [[ "$want" == keep ]]; then
+            msg_err "$DS_DEV has no usable Linux filesystem — it must be formatted"
+            return 1
+        fi
+        if [[ -z "$want" ]]; then
+            want=xfs
+            if [[ "$interactive" == true ]]; then
+                msg ""
+                msg "  ${BOLD}${CYAN}Step 3/4 — Filesystem${RESET}"
+                msg ""
+                if [[ -n "$DS_FSTYPE" ]]; then
+                    msg "  $DS_DEV has a ${BOLD}${DS_FSTYPE}${RESET} filesystem, which can't hold Linux permissions — it will be formatted."
+                else
+                    msg "  $DS_DEV is blank — it will be formatted."
+                fi
+                msg "    ${CYAN}1${RESET}) xfs   ${GREEN}(recommended — fast with large files, default on RHEL)${RESET}"
+                msg "    ${CYAN}2${RESET}) ext4  ${DIM}(can be shrunk later)${RESET}"
+                read -rp "  Select [1]: " choice
+                [[ "$choice" == 2 ]] && want=ext4
+            fi
+        fi
+    fi
+
+    [[ "$want" == keep ]] && return 0
+    DP_FORMAT=true
+    DP_FS=$want
+
+    # --- Erase guard: anything with a signature needs the device name typed ---
+    # Fail closed: a probe error or a known filesystem counts as "has data"
+    local sigs
+    if ! sigs=$(wipefs --noheadings --output TYPE "$DS_DEV" 2>/dev/null); then
+        sigs="unknown (probe failed)"
+    fi
+    [[ -n "$DS_FSTYPE" ]] && sigs="${DS_FSTYPE}"$'\n'"${sigs}"
+    sigs=$(printf '%s\n' "$sigs" | sed '/^$/d' | sort -u | tr '\n' ' ')
+    if [[ -n "$sigs" && "$preapproved" != true ]]; then
+        if [[ "$interactive" != true ]]; then
+            msg_err "Refusing to erase $DS_DEV (contains: ${sigs% }) in non-interactive mode"
+            msg_info "Run interactively to confirm, or pass 'keep' to use the existing filesystem"
+            return 1
+        fi
+        msg ""
+        msg_warn "${BOLD}Formatting ERASES everything on $DS_DEV${RESET} ($DS_SIZE, contains: ${sigs% })"
+        local typed
+        read -rp "  Type the device name ($DS_DEV) to confirm: " typed
+        if [[ "$typed" != "$DS_DEV" ]]; then
+            msg_info "Cancelled — nothing was changed"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Services to pause during the switch.  Sets DP_UNITS.
+disk_plan_units() {
+    local list
+    list=$(disk_units_for "$DT_PATH")
+    if [[ "$AUTO_YES" != true && "$WIZARD_ACTIVE" != true ]]; then
+        msg ""
+        msg "  ${BOLD}${CYAN}Step 4/4 — Services to pause during the switch${RESET}"
+        msg ""
+        if [[ -n "$list" ]]; then
+            msg "  ${DIM}Detected for $DT_PATH: ${list}${RESET}"
+        else
+            msg "  ${DIM}Stop anything that writes to $DT_PATH (e.g. a database). Leave blank if nothing does.${RESET}"
+        fi
+        msg "  ${DIM}They also get a systemd drop-in so they wait for this mount at boot.${RESET}"
+        local input
+        read -rp "  Services [${list:-none}]: " input
+        if [[ "$input" == "none" || "$input" == "-" ]]; then
+            list=""
+        elif [[ -n "$input" ]]; then
+            list=$input
+        fi
+    fi
+    DP_UNITS=()
+    local u
+    for u in $list; do
+        [[ "$u" == *.* ]] || u="${u}.service"
+        DP_UNITS+=("$u")
+    done
+}
+
+# Sets DT_HAS_DATA and DT_BYTES for the target directory.
+disk_measure_target() {
+    DT_HAS_DATA=false
+    DT_BYTES=0
+    [[ -d "$DT_PATH" && -n "$(ls -A "$DT_PATH" 2>/dev/null)" ]] || return 0
+    DT_HAS_DATA=true
+    ensure_tmp
+    du -sxB1 "$DT_PATH" 2>/dev/null | awk '{print $1}' > "$TMP_DIR/disk-du" &
+    spinner $! "Measuring data in $DT_PATH..."
+    DT_BYTES=$(cat "$TMP_DIR/disk-du" 2>/dev/null)
+    [[ "$DT_BYTES" =~ ^[0-9]+$ ]] || DT_BYTES=0
+}
+
+# .service units that get a "wait for mount" drop-in: the installed ones,
+# or the first one listed when none is installed yet (e.g. Docker comes later).
+disk_dropin_units() {
+    local u first=""
+    local -a out=()
+    for u in "${DP_UNITS[@]}"; do
+        [[ "$u" == *.service ]] || continue
+        # containerd is only paused for Docker paths, never gated on them at boot
+        [[ "$u" == containerd.service && "$DT_PATH" != /var/lib/containerd* ]] && continue
+        [[ -z "$first" ]] && first=$u
+        disk_unit_exists "$u" && out+=("$u")
+    done
+    (( ${#out[@]} == 0 )) && [[ -n "$first" ]] && out=("$first")
+    (( ${#out[@]} > 0 )) && printf '%s\n' "${out[@]}"
+}
+
+disk_fstab_pass() {
+    case "$1" in
+        ext2|ext3|ext4) echo 2 ;;
+        *)              echo 0 ;;   # xfs/btrfs don't use boot-time fsck
+    esac
+}
+
+disk_plan_row() {
+    msg "  ${CYAN}│${RESET}  ${BOLD}$(printf '%-12s' "$1")${RESET} $2"
+}
+
+disk_show_plan() {
+    local fs_line uuid_hint
+    if [[ "$DP_FORMAT" == true ]]; then
+        fs_line="${RED}${BOLD}FORMAT as ${DP_FS}${RESET} ${RED}— all data on $DS_DEV is erased${RESET}"
+    else
+        fs_line="keep existing ${DS_FSTYPE} filesystem ${DIM}(UUID ${DS_UUID})${RESET}"
+    fi
+    local units="${DIM}none${RESET}" dropins
+    (( ${#DP_UNITS[@]} > 0 )) && units="${DP_UNITS[*]} ${DIM}(stopped only for the final sync)${RESET}"
+    dropins=$(disk_dropin_units | tr '\n' ' ')
+
+    msg ""
+    msg "  ${CYAN}┌─ Plan ─────────────────────────────────────────────────${RESET}"
+    disk_plan_row "Disk" "$DS_DEV  ${DIM}($DS_SIZE)${RESET}"
+    [[ -n "$DS_MOUNT" ]] && disk_plan_row "Currently" "mounted at $DS_MOUNT ${DIM}→ will be retired${RESET}"
+    disk_plan_row "Filesystem" "$fs_line"
+    disk_plan_row "Mount at" "${BOLD}${DT_PATH}${RESET}"
+    if [[ "$DT_HAS_DATA" == true ]]; then
+        disk_plan_row "Data" "$(disk_human "$DT_BYTES") to copy ${DIM}(hot rsync, then a short cold delta pass)${RESET}"
+        disk_plan_row "Old copy" "kept as ${DT_PATH}.fta-bak-<timestamp> ${DIM}(delete after verifying)${RESET}"
+    else
+        disk_plan_row "Data" "${DIM}nothing to copy — ${DT_PATH} is empty or new${RESET}"
+    fi
+    disk_plan_row "Services" "$units"
+    disk_plan_row "fstab" "UUID=… ${DT_PATH} ${DP_FS} defaults,nofail 0 $(disk_fstab_pass "$DP_FS")"
+    [[ -n "$dropins" ]] && disk_plan_row "Boot order" "${dropins% } wait for the mount ${DIM}(systemd drop-in)${RESET}"
+    msg "  ${CYAN}└────────────────────────────────────────────────────────${RESET}"
+    msg ""
+}
+
+# --- Execution ---
+
+disk_step() {
+    DX_STEP=$((DX_STEP + 1))
+    msg ""
+    msg "  ${BOLD}${CYAN}[${DX_STEP}/${DX_TOTAL}]${RESET} ${BOLD}$1${RESET}"
+}
+
+# Undo everything disk_execute did so far, newest change first.
+disk_rollback() {
+    msg_step "Rolling back..."
+    if [[ "$DX_MOUNTED" == true ]]; then
+        umount "$DT_PATH" &>/dev/null && DX_MOUNTED=false
+    fi
+    if [[ -n "$DX_FSTAB_ORIG" && -f "$DX_FSTAB_ORIG" ]]; then
+        cat "$DX_FSTAB_ORIG" > /etc/fstab
+        systemctl daemon-reload &>/dev/null
+        msg_info "Restored /etc/fstab"
+    fi
+    if [[ -n "$DX_BACKUP" && -d "$DX_BACKUP" ]]; then
+        if rmdir "$DT_PATH" 2>/dev/null && mv "$DX_BACKUP" "$DT_PATH"; then
+            msg_info "Restored original $DT_PATH"
+        else
+            msg_err "Could not restore $DT_PATH — your data is safe in $DX_BACKUP"
+            msg_info "Fix manually: mv $DX_BACKUP $DT_PATH"
+        fi
+    elif [[ "$DX_NEW_DIR" == true ]]; then
+        rmdir "$DT_PATH" 2>/dev/null
+    fi
+    if [[ "$DX_OLD_UNMOUNTED" == true ]]; then
+        mount "$DS_DEV" "$DS_MOUNT" &>/dev/null && msg_info "Re-mounted $DS_DEV at $DS_MOUNT"
+    fi
+    if [[ "$DX_STAGE_MOUNTED" == true ]]; then
+        umount "$DX_STAGE" &>/dev/null
+    fi
+    [[ "$DX_STAGE_CREATED" == true ]] && rmdir "$DX_STAGE" 2>/dev/null
+    local i
+    for (( i = ${#DX_STOPPED[@]} - 1; i >= 0; i-- )); do
+        systemctl start "${DX_STOPPED[$i]}" &>/dev/null && msg_info "Started ${DX_STOPPED[$i]}"
+    done
+    DX_STOPPED=()
+    msg_warn "Rolled back — $DT_PATH is unchanged"
+}
+
+disk_fail() {
+    msg_err "$1"
+    disk_rollback
+    trap cleanup EXIT INT TERM
+    return 1
+}
+
+disk_execute() {
+    local ts dev=$DS_DEV target=$DT_PATH
+    ts=$(date +%Y%m%d-%H%M%S)
+    DX_STEP=0 DX_TOTAL=7
+    DX_STAGE="" DX_STAGE_CREATED=false DX_STAGE_MOUNTED=false DX_OLD_UNMOUNTED=false
+    DX_BACKUP="" DX_NEW_DIR=false DX_FSTAB_ORIG="" DX_MOUNTED=false
+    DX_STOPPED=()
+    ensure_tmp
+    trap 'msg ""; msg_warn "Interrupted"; disk_rollback; exit 130' INT TERM
+
+    # --- 1. Tools ---
+    disk_step "Checking tools"
+    local -a pkgs=()
+    command_exists rsync || pkgs+=(rsync)
+    case "$DP_FS" in
+        xfs)  command_exists mkfs.xfs   || pkgs+=(xfsprogs) ;;
+        ext*) command_exists mkfs.ext4  || pkgs+=(e2fsprogs) ;;
+    esac
+    if (( ${#pkgs[@]} > 0 )); then
+        msg_step "Installing ${pkgs[*]}..."
+        pkg_install "${pkgs[@]}"
+    fi
+    command_exists rsync || { disk_fail "rsync is required but could not be installed"; return 1; }
+    msg_ok "rsync $(rsync --version | awk 'NR==1{print $3}') ready"
+
+    # --- 2. Format ---
+    disk_step "Preparing filesystem"
+    if [[ "$DP_FORMAT" == true ]]; then
+        local label
+        label=$(basename "$target" | tr -cd 'A-Za-z0-9_-' | cut -c1-12)
+        wipefs -aq "$dev" &>/dev/null
+        case "$DP_FS" in
+            xfs)  mkfs.xfs -f -q ${label:+-L "$label"} "$dev" &>"$TMP_DIR/disk-mkfs.log" & ;;
+            # -m 1: a data disk doesn't need 5% reserved for root
+            ext4) mkfs.ext4 -F -q -m 1 ${label:+-L "$label"} "$dev" &>"$TMP_DIR/disk-mkfs.log" & ;;
+        esac
+        if ! spinner $! "Formatting $dev as $DP_FS..."; then
+            msg "    $(tail -3 "$TMP_DIR/disk-mkfs.log" 2>/dev/null)"
+            disk_fail "mkfs.$DP_FS failed on $dev"
+            return 1
+        fi
+        udevadm settle &>/dev/null
+        DS_FSTYPE=$DP_FS
+        DS_UUID=$(blkid -c /dev/null -s UUID -o value "$dev" 2>/dev/null)
+        msg_ok "Formatted $dev as $DP_FS ${DIM}(label: ${label:-none})${RESET}"
+    else
+        msg_ok "Using existing $DS_FSTYPE filesystem"
+    fi
+    if [[ -z "$DS_UUID" ]]; then
+        disk_fail "Could not read the UUID of $dev"
+        return 1
+    fi
+
+    # --- Stage: get the disk mounted somewhere we can copy into ---
+    if [[ -n "$DS_MOUNT" ]]; then
+        DX_STAGE=$DS_MOUNT
+    else
+        DX_STAGE="/mnt/.fta-stage-${ts}"
+        mkdir -p "$DX_STAGE" && DX_STAGE_CREATED=true
+        if ! mount "$dev" "$DX_STAGE" 2>"$TMP_DIR/disk-mount.log"; then
+            msg "    $(cat "$TMP_DIR/disk-mount.log")"
+            disk_fail "Could not mount $dev"
+            return 1
+        fi
+        DX_STAGE_MOUNTED=true
+    fi
+
+    # overlay2 (Docker data root) needs XFS with d_type support
+    if [[ "$DP_FS" == xfs && ( "$target" == /var/lib/docker || "$target" == /var/lib/containerd ) ]] \
+        && command_exists xfs_info && ! xfs_info "$DX_STAGE" 2>/dev/null | grep -q 'ftype=1'; then
+        disk_fail "This XFS filesystem has ftype=0 — Docker's overlay2 needs ftype=1 (reformat the disk)"
+        return 1
+    fi
+
+    # --- 3. Copy (hot pass) ---
+    disk_step "Copying data (services still running)"
+    local mirror=true rsync_opts=(-aHAXx --numeric-ids --exclude=/lost+found)
+    if [[ "$DT_HAS_DATA" == true ]]; then
+        local avail
+        avail=$(df -B1 --output=avail "$DX_STAGE" 2>/dev/null | tail -1 | tr -d ' ')
+        if [[ "$avail" =~ ^[0-9]+$ ]] && (( DT_BYTES + DT_BYTES / 20 > avail )); then
+            disk_fail "Not enough space: need ~$(disk_human "$DT_BYTES"), disk has $(disk_human "$avail") free"
+            return 1
+        fi
+        if [[ -n "$(find "$DX_STAGE" -mindepth 1 -maxdepth 1 ! -name lost+found 2>/dev/null | head -1)" ]]; then
+            mirror=false
+            msg_warn "$dev already contains files"
+            if [[ "$AUTO_YES" != true && "$WIZARD_ACTIVE" != true ]]; then
+                msg "    ${CYAN}1${RESET}) Merge  — copy on top, keep files that are only on the disk  ${GREEN}(safe)${RESET}"
+                msg "    ${CYAN}2${RESET}) Mirror — make the disk an exact copy; files only on the disk are ${RED}DELETED${RESET}"
+                msg "    ${CYAN}0${RESET}) Cancel"
+                local choice
+                read -rp "  Select [1]: " choice
+                case "${choice:-1}" in
+                    2) mirror=true ;;
+                    0) disk_fail "Cancelled by user"; return 1 ;;
+                esac
+            else
+                msg_info "Merging — files already on the disk are kept"
+            fi
+        fi
+        local -a progress=()
+        [[ -t 1 ]] && progress=(--info=progress2)
+        rsync "${rsync_opts[@]}" "${progress[@]}" "$target/" "$DX_STAGE/"
+        local rc=$?
+        # 24 = some files vanished mid-copy, expected while services run
+        if (( rc != 0 && rc != 24 )); then
+            disk_fail "rsync failed (exit $rc)"
+            return 1
+        fi
+        msg_ok "Hot copy finished"
+    else
+        msg_info "Nothing to copy"
+    fi
+
+    # --- 4. Stop services, final delta, verify ---
+    disk_step "Pausing services & final sync"
+    local u
+    for u in "${DP_UNITS[@]}"; do
+        if systemctl is-active --quiet "$u" 2>/dev/null; then
+            msg_step "Stopping $u..."
+            if ! systemctl stop "$u" &>/dev/null; then
+                disk_fail "Could not stop $u"
+                return 1
+            fi
+            DX_STOPPED+=("$u")
+        fi
+    done
+    (( ${#DX_STOPPED[@]} == 0 )) && msg_info "No running services to pause"
+    local leftover
+    leftover=$(findmnt -rno TARGET 2>/dev/null | awk -v p="$target/" 'index($1, p) == 1')
+    if [[ -n "$leftover" ]]; then
+        msg "    ${leftover//$'\n'/$'\n'    }"
+        disk_fail "Mounts are still active inside $target (listed above)"
+        return 1
+    fi
+    if [[ "$DT_HAS_DATA" == true ]]; then
+        local -a del=()
+        [[ "$mirror" == true ]] && del=(--delete)
+        rsync "${rsync_opts[@]}" "${del[@]}" "$target/" "$DX_STAGE/" &>"$TMP_DIR/disk-rsync.log" &
+        if ! spinner $! "Final delta sync..."; then
+            msg "    $(tail -3 "$TMP_DIR/disk-rsync.log" 2>/dev/null)"
+            disk_fail "Final rsync failed"
+            return 1
+        fi
+        msg_ok "Final sync finished"
+
+        local diffs
+        rsync "${rsync_opts[@]}" "${del[@]}" -n --out-format='%n' "$target/" "$DX_STAGE/" 2>/dev/null \
+            | grep -v '^\./$' > "$TMP_DIR/disk-verify" &
+        spinner $! "Verifying copy..."
+        diffs=$(wc -l < "$TMP_DIR/disk-verify")
+        if (( diffs > 0 )); then
+            msg_warn "Verification found ${diffs} difference(s), e.g.:"
+            head -5 "$TMP_DIR/disk-verify" | sed 's/^/      /'
+            if [[ "$AUTO_YES" == true || "$WIZARD_ACTIVE" == true ]] || ! confirm "Something is still writing to $target. Continue anyway?" "N"; then
+                disk_fail "Copy could not be verified"
+                return 1
+            fi
+        else
+            msg_ok "Copy verified — disk matches $target"
+        fi
+    fi
+
+    # --- 5. Switch directories ---
+    disk_step "Switching $target to the disk"
+    if ! umount "$DX_STAGE" 2>"$TMP_DIR/disk-umount.log"; then
+        msg "    $(cat "$TMP_DIR/disk-umount.log")"
+        disk_fail "Could not unmount $DX_STAGE (is a shell or process using it?)"
+        return 1
+    fi
+    if [[ -n "$DS_MOUNT" ]]; then
+        DX_OLD_UNMOUNTED=true
+    else
+        DX_STAGE_MOUNTED=false
+        rmdir "$DX_STAGE" 2>/dev/null && DX_STAGE_CREATED=false
+    fi
+    if [[ "$DT_HAS_DATA" == true ]]; then
+        local backup="${target}.fta-bak-${ts}"
+        if ! mv "$target" "$backup"; then
+            disk_fail "Could not move $target aside"
+            return 1
+        fi
+        DX_BACKUP=$backup
+        mkdir "$target"
+        chmod --reference="$backup" "$target" 2>/dev/null
+        chown --reference="$backup" "$target" 2>/dev/null
+        msg_ok "Original kept as $backup"
+    elif [[ ! -d "$target" ]]; then
+        mkdir -p "$target" && DX_NEW_DIR=true
+    fi
+
+    # --- 6. fstab + mount ---
+    disk_step "Mounting via /etc/fstab"
+    DX_FSTAB_ORIG="$TMP_DIR/fstab.orig"
+    cp -p /etc/fstab "$DX_FSTAB_ORIG" 2>/dev/null || : > "$DX_FSTAB_ORIG"
+    backup_file /etc/fstab
+    local entry="UUID=${DS_UUID} ${target} ${DP_FS} defaults,nofail 0 $(disk_fstab_pass "$DP_FS")"
+    # Drop stale lines for this disk, its old mountpoint, and the target
+    awk -v uuid="UUID=${DS_UUID}" -v dev="$dev" -v old="${DS_MOUNT:-//none}" -v tgt="$target" \
+        '/^[[:space:]]*#/ || NF < 2 {print; next}
+         $1 == uuid || $1 == dev || $2 == old || $2 == tgt {next}
+         {print}' "$DX_FSTAB_ORIG" > "$TMP_DIR/fstab.new"
+    {
+        printf '# Data disk %s — added by FTA Server Toolbox %s\n' "$dev" "$(date '+%Y-%m-%d %H:%M')"
+        echo "$entry"
+    } >> "$TMP_DIR/fstab.new"
+    cat "$TMP_DIR/fstab.new" > /etc/fstab
+    systemctl daemon-reload &>/dev/null
+    if ! mount "$target" 2>"$TMP_DIR/disk-mount.log"; then
+        msg "    $(cat "$TMP_DIR/disk-mount.log")"
+        disk_fail "Mounting $target from fstab failed"
+        return 1
+    fi
+    DX_MOUNTED=true
+    local mounted_dev
+    mounted_dev=$(findmnt -no SOURCE --mountpoint "$target" 2>/dev/null | head -1)
+    if [[ "$(readlink -f "$mounted_dev")" != "$(readlink -f "$dev")" ]]; then
+        disk_fail "Verification failed: $target shows ${mounted_dev:-nothing} instead of $dev"
+        return 1
+    fi
+    msg_ok "fstab: ${DIM}${entry}${RESET}"
+    msg_ok "$dev mounted at $target"
+    # From here on the new layout is live — no more rollback
+    DX_FSTAB_ORIG=""
+    trap cleanup EXIT INT TERM
+
+    # --- 7. Finalize ---
+    disk_step "Finishing up"
+    if command_exists restorecon && command_exists selinuxenabled && selinuxenabled; then
+        restorecon -R "$target" &>/dev/null &
+        spinner $! "Restoring SELinux labels..."
+        msg_ok "SELinux labels restored"
+    fi
+    local dropin_name unit
+    dropin_name="fta-mount-$(systemd-escape --path "$target" 2>/dev/null || echo "${target//\//-}").conf"
+    while read -r unit; do
+        [[ -z "$unit" ]] && continue
+        mkdir -p "/etc/systemd/system/${unit}.d"
+        cat > "/etc/systemd/system/${unit}.d/${dropin_name}" << DROPIN
+# Managed by FTA Server Toolbox — don't start until the data disk is mounted
+[Unit]
+RequiresMountsFor=${target}
+ConditionPathIsMountPoint=${target}
+DROPIN
+        msg_ok "${unit} waits for ${target} at boot"
+    done < <(disk_dropin_units)
+    systemctl daemon-reload &>/dev/null
+
+    local i failed=false
+    for (( i = ${#DX_STOPPED[@]} - 1; i >= 0; i-- )); do
+        u=${DX_STOPPED[$i]}
+        if systemctl start "$u" &>/dev/null; then
+            msg_ok "Started $u"
+        else
+            msg_err "$u failed to start — check: journalctl -u $u"
+            failed=true
+        fi
+    done
+    if [[ " ${DX_STOPPED[*]} " == *" docker.service "* ]] && command_exists docker && [[ "$failed" == false ]]; then
+        msg_ok "Docker is up — $(docker volume ls -q 2>/dev/null | wc -l) volume(s), $(docker ps -q 2>/dev/null | wc -l) running container(s)"
+    fi
+
+    # Retire the old mountpoint directory if it is now an empty leftover
+    if [[ "$DS_MOUNT" == /mnt/* || "$DS_MOUNT" == /media/* ]]; then
+        rmdir "$DS_MOUNT" 2>/dev/null && msg_info "Removed empty old mountpoint $DS_MOUNT"
+    fi
+
+    mkdir -p "$CONFIG_DIR"
+    printf '%s|%s|%s|%s|%s|%s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$dev" "$DS_UUID" "$DP_FS" "$target" "$DX_BACKUP" \
+        >> "$DISK_REGISTRY"
+    log "DISK: $dev (UUID=$DS_UUID, $DP_FS) mounted at $target; backup=${DX_BACKUP:-none}"
+
+    # --- Summary ---
+    msg ""
+    msg "  ${GREEN}${BOLD}$dev → $target${RESET}"
+    msg "  ${DIM}$(df -h --output=used,size,pcent "$target" 2>/dev/null | tail -1 | awk '{print "Used " $1 " of " $2 " (" $3 ")"}')${RESET}"
+    if [[ -n "$DX_BACKUP" ]]; then
+        msg ""
+        msg_warn "The old copy still uses $(disk_human "$DT_BYTES") on the system disk: ${BOLD}${DX_BACKUP}${RESET}"
+        local hint=""
+        [[ " ${DP_UNITS[*]} " == *" docker.service "* ]] && hint=" (e.g. docker ps)"
+        msg "     Check that everything works${hint}, then free the space with:"
+        msg "       ${CYAN}rm -rf ${DX_BACKUP}${RESET}   ${DIM}or menu → Disk & Mount Manager → Clean up migration backups${RESET}"
+    fi
+    msg ""
+    msg_done "Disk mounted at $target"
+    return 0
+}
+
+# Full mount flow: pick (or take) disk + target, plan, confirm, execute.
+#   $1 source  $2 target  $3 fs preference  $4 erase pre-approved
+disk_mount_flow() {
+    local src=${1:-} target=${2:-} fs=${3:-} preapproved=${4:-false}
+
+    if [[ -z "$src" ]]; then
+        disk_pick_source || return 0
+        src=$DISK_PICK
+    fi
+    disk_resolve_source "$src" || return 1
+    if [[ -z "$target" ]]; then
+        disk_pick_target || return 0
+        target=$DISK_PICK
+    fi
+    disk_resolve_target "$target" || return 1
+    disk_check_pair || return 1
+    if [[ -n "$DS_MOUNT" ]] && command_exists fuser && fuser -m "$DS_MOUNT" &>/dev/null; then
+        msg_warn "Something is using $DS_MOUNT (a shell cd'ed into it?) — it must be released before the switch"
+    fi
+    disk_plan_format "$fs" "$preapproved" || return 1
+    disk_plan_units
+    disk_measure_target
+    if [[ "$DT_HAS_DATA" == true && "$DS_BYTES" =~ ^[0-9]+$ ]] && (( DT_BYTES > DS_BYTES )); then
+        msg_err "$DT_PATH holds $(disk_human "$DT_BYTES") but $DS_DEV is only $DS_SIZE"
+        return 1
+    fi
+    disk_show_plan
+
+    if [[ "$DRY_RUN" == true ]]; then
+        msg_info "[DRY-RUN] No changes made"
+        return 0
+    fi
+    if ! confirm "Proceed with this plan?" "N"; then
+        msg_info "Cancelled — nothing was changed"
+        return 0
+    fi
+    disk_execute
+}
+
+# Unmount a data disk and remove its fstab entry and drop-ins.
+disk_unmount_flow() {
+    local -a targets=()
+    local t s f i=1
+    msg ""
+    msg "  ${BOLD}Data mounts:${RESET}"
+    while read -r t s f; do
+        targets+=("$t")
+        local st="${RED}not mounted${RESET}"
+        mountpoint -q "$t" 2>/dev/null && st="${GREEN}mounted${RESET}"
+        printf "    ${CYAN}%2d${RESET}) %-30s %b  ${DIM}%s · %s${RESET}\n" "$i" "$t" "$st" "$s" "$f"
+        i=$((i + 1))
+    done < <(disk_list_data_mounts)
+    if (( ${#targets[@]} == 0 )); then
+        msg "    ${DIM}none${RESET}"
+        return 0
+    fi
+    msg "     ${CYAN}0${RESET}) Cancel"
+    local choice
+    read -rp "  Select mount: " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#targets[@]} )) || return 0
+    local target=${targets[$((choice - 1))]}
+    local dropin_name
+    dropin_name="fta-mount-$(systemd-escape --path "$target" 2>/dev/null || echo "${target//\//-}").conf"
+
+    # Services that were told to wait for this mount
+    local -a units=() dropins=()
+    local d u
+    for d in /etc/systemd/system/*.d/"$dropin_name"; do
+        [[ -f "$d" ]] || continue
+        dropins+=("$d")
+        u=$(basename "$(dirname "$d")"); u=${u%.d}
+        units+=("$u")
+    done
+
+    msg ""
+    msg_warn "Data stays on the disk, but $target becomes an empty folder on the system disk"
+    (( ${#units[@]} > 0 )) && msg_warn "These services depend on it and will be stopped: ${units[*]}"
+    if ! confirm "Unmount $target and remove it from /etc/fstab?" "N"; then
+        msg_info "Cancelled"
+        return 0
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+        msg_info "[DRY-RUN] Would unmount $target and remove its fstab entry"
+        return 0
+    fi
+
+    for u in "${units[@]}"; do
+        for s in "${u%.service}.socket" "$u"; do
+            systemctl is-active --quiet "$s" 2>/dev/null && systemctl stop "$s" &>/dev/null && msg_info "Stopped $s"
+        done
+    done
+    if mountpoint -q "$target" && ! umount "$target" 2>/dev/null; then
+        msg_err "$target is busy — something is still using it:"
+        command_exists fuser && fuser -vm "$target" 2>&1 | sed 's/^/      /' | head -10
+        return 1
+    fi
+    backup_file /etc/fstab
+    ensure_tmp
+    awk -v tgt="$target" '/^[[:space:]]*#/ || NF < 2 {print; next} $2 == tgt {next} {print}' \
+        /etc/fstab > "$TMP_DIR/fstab.new" && cat "$TMP_DIR/fstab.new" > /etc/fstab
+    for d in "${dropins[@]}"; do
+        rm -f "$d"
+        rmdir "$(dirname "$d")" 2>/dev/null
+    done
+    systemctl daemon-reload &>/dev/null
+    msg_ok "Unmounted $target and removed it from /etc/fstab"
+    log "DISK: unmounted $target"
+
+    # Offer to put the pre-migration copy back
+    local latest
+    latest=$(disk_list_backups | awk -F'|' -v t="$target" '$2 == t {b=$1} END {print b}')
+    if [[ -n "$latest" ]] && [[ -z "$(ls -A "$target" 2>/dev/null)" ]]; then
+        msg_info "A pre-migration copy exists: $latest"
+        msg "     ${DIM}It holds $target as it was before the migration — later changes are only on the disk.${RESET}"
+        if confirm "Restore it to $target?" "N"; then
+            rmdir "$target" && mv "$latest" "$target" && msg_ok "Restored $target from $latest"
+        fi
+    fi
+    (( ${#units[@]} > 0 )) && msg_info "Start the services again when ready: systemctl start ${units[*]}"
+}
+
+# Grow a data filesystem after the disk was enlarged in the hypervisor/cloud.
+disk_grow_flow() {
+    local -a targets=()
+    local t s f i=1
+    msg ""
+    msg "  ${BOLD}Mounted data disks:${RESET}"
+    while read -r t s f; do
+        mountpoint -q "$t" 2>/dev/null || continue
+        targets+=("$t")
+        local dev size
+        dev=$(findmnt -no SOURCE --mountpoint "$t" | head -1)
+        size=$(df -h --output=size "$t" | tail -1 | tr -d ' ')
+        printf "    ${CYAN}%2d${RESET}) %-30s ${DIM}%s · %s · filesystem %s · device %s${RESET}\n" \
+            "$i" "$t" "$dev" "$f" "$size" "$(disk_attr "$dev" SIZE)"
+        i=$((i + 1))
+    done < <(disk_list_data_mounts)
+    if (( ${#targets[@]} == 0 )); then
+        msg "    ${DIM}none${RESET}"
+        return 0
+    fi
+    msg "     ${CYAN}0${RESET}) Cancel"
+    local choice
+    read -rp "  Select mount: " choice
+    [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#targets[@]} )) || return 0
+    local target=${targets[$((choice - 1))]}
+    local dev fstype type name before
+    dev=$(findmnt -no SOURCE --mountpoint "$target" | head -1)
+    fstype=$(findmnt -no FSTYPE --mountpoint "$target" | head -1)
+    type=$(disk_attr "$dev" TYPE)
+    name=$(basename "$(readlink -f "$dev")")
+    before=$(df -h --output=size "$target" | tail -1 | tr -d ' ')
+
+    if [[ "$type" == lvm ]]; then
+        msg_info "$dev is an LVM volume — grow it with: ${BOLD}lvextend -r -l +100%FREE $dev${RESET}"
+        return 0
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+        msg_info "[DRY-RUN] Would rescan $dev and grow its $fstype filesystem"
+        return 0
+    fi
+
+    # Make the kernel notice the new size without a reboot
+    case "$type" in
+        disk)
+            [[ -w "/sys/class/block/${name}/device/rescan" ]] && echo 1 > "/sys/class/block/${name}/device/rescan"
+            ;;
+        part)
+            local parent partnum
+            parent=$(disk_attr "$dev" PKNAME)
+            partnum=$(cat "/sys/class/block/${name}/partition" 2>/dev/null)
+            [[ -w "/sys/class/block/${parent##*/}/device/rescan" ]] && echo 1 > "/sys/class/block/${parent##*/}/device/rescan"
+            if ! command_exists growpart; then
+                msg_step "Installing growpart..."
+                case "$OS_FAMILY" in
+                    rhel)   pkg_install cloud-utils-growpart ;;
+                    debian) pkg_install cloud-guest-utils ;;
+                esac
+            fi
+            if command_exists growpart; then
+                growpart "$parent" "$partnum" &>/dev/null && msg_ok "Partition $dev grown"
+            else
+                msg_warn "growpart unavailable — the partition itself may not be grown"
+            fi
+            ;;
+    esac
+    udevadm settle &>/dev/null
+
+    case "$fstype" in
+        xfs)   xfs_growfs "$target" &>/dev/null ;;
+        ext*)  resize2fs "$dev" &>/dev/null ;;
+        btrfs) btrfs filesystem resize max "$target" &>/dev/null ;;
+        *)     msg_err "Don't know how to grow $fstype"; return 1 ;;
+    esac
+    local after
+    after=$(df -h --output=size "$target" | tail -1 | tr -d ' ')
+    if [[ "$after" == "$before" ]]; then
+        msg_info "$target is still $after — the disk has no extra space (resize it in your hypervisor/cloud first)"
+    else
+        msg_ok "$target grown: $before → $after"
+        log "DISK: grew $target $before -> $after"
+    fi
+}
+
+# Delete pre-migration backups once the new mount is proven.
+disk_cleanup_backups() {
+    local -a backups=()
+    local b t d i=1
+    msg ""
+    msg "  ${BOLD}Pre-migration backups:${RESET}"
+    while IFS='|' read -r b t d; do
+        backups+=("$b")
+        local size st
+        size=$(du -sh "$b" 2>/dev/null | awk '{print $1}')
+        st="${GREEN}${t} is mounted${RESET}"
+        mountpoint -q "$t" 2>/dev/null || st="${RED}${t} is NOT mounted — this may be your only copy${RESET}"
+        printf "    ${CYAN}%2d${RESET}) %-46s %6s  ${DIM}%s${RESET}  %b\n" "$i" "$b" "$size" "$d" "$st"
+        i=$((i + 1))
+    done < <(disk_list_backups)
+    if (( ${#backups[@]} == 0 )); then
+        msg "    ${DIM}none — nothing to clean up${RESET}"
+        return 0
+    fi
+    msg "     ${CYAN}a${RESET}) All of them"
+    msg "     ${CYAN}0${RESET}) Cancel"
+    local choice
+    local -a selected=()
+    read -rp "  Select backup to delete: " choice
+    if [[ "$choice" == a || "$choice" == A ]]; then
+        selected=("${backups[@]}")
+    elif [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#backups[@]} )); then
+        selected=("${backups[$((choice - 1))]}")
+    else
+        return 0
+    fi
+    msg_warn "This permanently deletes: ${selected[*]}"
+    if ! confirm "Delete?" "N"; then
+        msg_info "Cancelled"
+        return 0
+    fi
+    for b in "${selected[@]}"; do
+        # Only ever delete what we created
+        if [[ "$b" != *.fta-bak-* || ! -d "$b" ]] || mountpoint -q "$b"; then
+            msg_warn "Skipping $b (not a toolbox backup)"
+            continue
+        fi
+        if [[ "$DRY_RUN" == true ]]; then
+            msg_info "[DRY-RUN] Would delete $b"
+            continue
+        fi
+        rm -rf "$b" &
+        spinner $! "Deleting $b..."
+        [[ -d "$b" ]] && msg_err "Could not fully delete $b" || msg_ok "Deleted $b"
+    done
+}
+
+# Wizard: collect disk, target and format choice upfront (Phase 1b).
+# Leaves WIZARD_CFG_DISK_* empty when the user backs out.
+disk_wizard_collect() {
+    WIZARD_CFG_DISK_SRC="" WIZARD_CFG_DISK_TARGET="" WIZARD_CFG_DISK_FS=""
+    disk_pick_source || return 1
+    disk_resolve_source "$DISK_PICK" || return 1
+    disk_pick_target || return 1
+    disk_resolve_target "$DISK_PICK" || return 1
+    disk_check_pair || return 1
+    disk_plan_format "" false || return 1
+    WIZARD_CFG_DISK_SRC=$DS_DEV
+    WIZARD_CFG_DISK_TARGET=$DT_PATH
+    if [[ "$DP_FORMAT" == true ]]; then
+        WIZARD_CFG_DISK_FS=$DP_FS
+    else
+        WIZARD_CFG_DISK_FS="keep"
+    fi
+    return 0
+}
+
+disk_menu_loop() {
+    while true; do
+        local nb
+        nb=$(disk_list_backups | wc -l)
+        msg ""
+        msg "    ${BOLD}1${RESET})  Show disks & mounts"
+        msg "    ${BOLD}2${RESET})  Mount a disk ${DIM}(move a folder like Docker volumes onto it)${RESET}"
+        msg "    ${BOLD}3${RESET})  Unmount a data disk"
+        msg "    ${BOLD}4${RESET})  Grow a filesystem ${DIM}(after enlarging the disk)${RESET}"
+        if (( nb > 0 )); then
+            msg "    ${BOLD}5${RESET})  Clean up migration backups ${YELLOW}(${nb} pending)${RESET}"
+        else
+            msg "    ${BOLD}5${RESET})  Clean up migration backups"
+        fi
+        msg "    ${BOLD}0${RESET})  Back to main menu"
+        msg ""
+        local choice
+        read -rp "  Select an option: " choice
+        case "$choice" in
+            1) msg ""; disk_show_overview ;;
+            2) disk_mount_flow ;;
+            3) disk_unmount_flow ;;
+            4) disk_grow_flow ;;
+            5) disk_cleanup_backups ;;
+            0|q|Q) return 0 ;;
+            *) msg_warn "Invalid option: $choice" ;;
+        esac
+    done
+}
+
+# Usage:  module_disk [SOURCE TARGET [xfs|ext4|keep]]
+#   SOURCE  block device (/dev/sdb) or a mounted path (/mnt/data)
+#   TARGET  directory to mount it on (/var/lib/docker/volumes)
+module_disk() {
+    msg_header "💽 Disk & Mount Manager"
+
+    if is_container; then
+        msg_warn "Running inside a container — disks are managed on the host"
+        return 0
+    fi
+    if ! command_exists lsblk || ! command_exists findmnt; then
+        pkg_install util-linux
+    fi
+
+    local src=${1:-} target=${2:-} fs=${3:-} preapproved=false
+    if [[ -n "$WIZARD_CFG_DISK_SRC" ]]; then
+        src=$WIZARD_CFG_DISK_SRC target=$WIZARD_CFG_DISK_TARGET fs=$WIZARD_CFG_DISK_FS preapproved=true
+    fi
+
+    disk_show_overview
+
+    # --- Direct run: disk and target given (CLI or wizard) ---
+    if [[ -n "$src" ]]; then
+        if [[ -z "$target" ]]; then
+            msg_err "Missing target directory"
+            msg_info "Usage: fta-toolbox.sh disk <device|mounted-path> <target-dir> [xfs|ext4|keep]"
+            return 1
+        fi
+        disk_mount_flow "$src" "$target" "$fs" "$preapproved"
+        return $?
+    fi
+
+    # --- Non-interactive without arguments: overview only ---
+    if [[ "$AUTO_YES" == true || "$WIZARD_ACTIVE" == true ]]; then
+        msg_info "Overview only — to mount a disk non-interactively:"
+        msg "     ${CYAN}fta-toolbox.sh --yes disk /dev/sdb /var/lib/docker/volumes${RESET}"
+        return 0
+    fi
+
+    disk_menu_loop
+    msg_done "Disk management complete"
+}
+
+# =============================================================================
+# SECTION 20: FULL AUTO SETUP WIZARD
 # =============================================================================
 
 module_full_setup() {
@@ -2442,7 +3755,7 @@ module_full_setup() {
     local do_update="Y" do_network="Y" do_modern="Y"
     local do_security="Y" do_firewall="Y" do_tuning="Y" do_timezone="Y" do_dns="Y"
     # Optional modules — NOT included by default (N)
-    local do_nodejs="N" do_docker="N" do_portainer="N" do_watchtower="N" do_swap="N"
+    local do_nodejs="N" do_docker="N" do_portainer="N" do_watchtower="N" do_swap="N" do_disk="N"
 
     if [[ "$AUTO_YES" == true ]]; then
         # In --yes mode, run core modules automatically but still skip optional ones.
@@ -2463,6 +3776,7 @@ module_full_setup() {
         msg "    ⏭  Portainer       →  ./fta-toolbox.sh --yes portainer"
         msg "    ⏭  Watchtower      →  ./fta-toolbox.sh --yes watchtower"
         msg "    ⏭  Swap            →  ./fta-toolbox.sh --yes swap"
+        msg "    ⏭  Data disk       →  ./fta-toolbox.sh disk /dev/sdb /var/lib/docker/volumes"
         msg ""
     else
         msg "  ${BOLD}${CYAN}── Step 1: Select Modules ──${RESET}"
@@ -2489,12 +3803,20 @@ module_full_setup() {
             confirm "  👀 Deploy Watchtower (auto-updater)?" "N" && do_watchtower="Y" || do_watchtower="N"
         fi
         confirm "  💾 Configure swap?" "N" && do_swap="Y" || do_swap="N"
+        # Only offer the data disk when a free disk is actually attached
+        if ! is_container && command_exists lsblk; then
+            disk_collect_candidates
+            if (( ${#DISK_CANDIDATES[@]} > 0 )); then
+                confirm "  💽 Mount a data disk (e.g. for Docker volumes)? ${DIM}(${#DISK_CANDIDATES[@]} free)${RESET}" "N" \
+                    && do_disk="Y" || do_disk="N"
+            fi
+        fi
 
         # ---------------------------------------------------------------------
         # Phase 1b: Collect configuration for selected modules
         # ---------------------------------------------------------------------
         local has_config=false
-        [[ "$do_timezone" == "Y" || "$do_dns" == "Y" || "$do_nodejs" == "Y" || "$do_swap" == "Y" ]] && has_config=true
+        [[ "$do_timezone" == "Y" || "$do_dns" == "Y" || "$do_nodejs" == "Y" || "$do_swap" == "Y" || "$do_disk" == "Y" ]] && has_config=true
 
         if [[ "$has_config" == true ]]; then
             msg ""
@@ -2579,6 +3901,16 @@ module_full_setup() {
             WIZARD_CFG_SWAP_SIZE="${user_swap:-${rec_gb}G}"
         fi
 
+        # --- Data disk config ---
+        if [[ "$do_disk" == "Y" ]]; then
+            msg ""
+            msg "  ${BOLD}💽 Data Disk:${RESET}"
+            if ! disk_wizard_collect; then
+                msg_info "Data disk skipped"
+                do_disk="N"
+            fi
+        fi
+
         # --- Summary ---
         msg ""
         msg "  ${BOLD}${CYAN}── Setup Plan ──${RESET}"
@@ -2586,6 +3918,13 @@ module_full_setup() {
         [[ "$do_update" == "Y" ]]    && msg "    ✅ System Update"                                             || msg "    ⏭  System Update"
         [[ "$do_network" == "Y" ]]   && msg "    ✅ Network Tools"                                             || msg "    ⏭  Network Tools"
         [[ "$do_modern" == "Y" ]]    && msg "    ✅ Modern CLI Tools"                                          || msg "    ⏭  Modern CLI Tools"
+        if [[ "$do_disk" == "Y" ]]; then
+            local disk_fs_note
+            [[ "$WIZARD_CFG_DISK_FS" == "keep" ]] && disk_fs_note="keep filesystem" || disk_fs_note="${RED}format ${WIZARD_CFG_DISK_FS}${RESET}"
+            msg "    ✅ Data Disk  → ${WIZARD_CFG_DISK_SRC} → ${WIZARD_CFG_DISK_TARGET} (${disk_fs_note})"
+        else
+            msg "    ⏭  Data Disk"
+        fi
         [[ "$do_nodejs" == "Y" ]]    && msg "    ✅ Node.js ${WIZARD_CFG_NODE_VER} LTS"                        || msg "    ⏭  Node.js"
         [[ "$do_docker" == "Y" ]]     && msg "    ✅ Docker"                                                    || msg "    ⏭  Docker"
         [[ "$do_portainer" == "Y" ]]  && msg "    ✅ Portainer"                                                 || msg "    ⏭  Portainer"
@@ -2614,6 +3953,7 @@ module_full_setup() {
     [[ "$do_update" == "Y" ]]    && ((total++))
     [[ "$do_network" == "Y" ]]   && ((total++))
     [[ "$do_modern" == "Y" ]]    && ((total++))
+    [[ "$do_disk" == "Y" ]]      && ((total++))
     [[ "$do_nodejs" == "Y" ]]    && ((total++))
     [[ "$do_docker" == "Y" ]]     && ((total++))
     [[ "$do_portainer" == "Y" ]]  && ((total++))
@@ -2636,6 +3976,11 @@ module_full_setup() {
     if [[ "$do_modern" == "Y" ]]; then
         ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Modern CLI Tools ━━━${RESET}"
         module_modern_tools
+    fi
+    # Before Docker so a fresh install writes straight to the data disk
+    if [[ "$do_disk" == "Y" ]]; then
+        ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Data Disk ━━━${RESET}"
+        module_disk
     fi
     if [[ "$do_nodejs" == "Y" ]]; then
         ((step++)); msg ""; msg "  ${BOLD}${CYAN}━━━ Step ${step}/${total}: Node.js ━━━${RESET}"
@@ -2691,6 +4036,7 @@ module_full_setup() {
     # Clear wizard config so standalone module runs are not affected
     WIZARD_CFG_TIMEZONE="" WIZARD_CFG_DNS1="" WIZARD_CFG_DNS2=""
     WIZARD_CFG_NODE_VER="" WIZARD_CFG_NODE_TOOLS="" WIZARD_CFG_SWAP_SIZE=""
+    WIZARD_CFG_DISK_SRC="" WIZARD_CFG_DISK_TARGET="" WIZARD_CFG_DISK_FS=""
 
     msg ""
     msg_header "🎉 Setup Complete!"
@@ -2706,7 +4052,7 @@ module_full_setup() {
 }
 
 # =============================================================================
-# SECTION 20: SELF-UPDATE
+# SECTION 21: SELF-UPDATE
 # =============================================================================
 
 self_update() {
@@ -2753,7 +4099,7 @@ self_update() {
 }
 
 # =============================================================================
-# SECTION 21: MENU SYSTEM
+# SECTION 22: MENU SYSTEM
 # =============================================================================
 
 show_menu() {
@@ -2774,6 +4120,7 @@ show_menu() {
     msg "   ${BOLD}12${RESET})  💾  Swap Management"
     msg "   ${BOLD}13${RESET})  🌍  DNS Configuration"
     msg "   ${BOLD}14${RESET})  🔥  Firewall Management"
+    msg "   ${BOLD}15${RESET})  💽  Disk & Mount Manager"
     msg ""
     msg "    ${DIM}─────────────────────────────────────${RESET}"
     msg "   ${BOLD}88${RESET})  🚀  ${GREEN}Full Auto Setup${RESET}"
@@ -2799,6 +4146,7 @@ handle_choice() {
         12) module_swap ;;
         13) module_dns ;;
         14) module_firewall ;;
+        15) module_disk ;;
         88) module_full_setup ;;
         99) self_update ;;
         0|q|Q|exit)
@@ -2823,7 +4171,7 @@ menu_loop() {
 }
 
 # =============================================================================
-# SECTION 22: CLI ARGUMENT PARSING & MAIN
+# SECTION 23: CLI ARGUMENT PARSING & MAIN
 # =============================================================================
 
 show_help() {
@@ -2855,6 +4203,10 @@ show_help() {
     swap             Configure swap
     dns              Configure DNS servers
     firewall         Manage firewall (firewalld/ufw)
+    disk [SRC DIR [FS]]
+                     Disk & mount manager — mount a data disk at DIR,
+                     moving existing data (SRC = /dev/sdX or mounted path,
+                     FS = xfs | ext4 | keep; blank disks default to xfs)
     full             Run full setup wizard
 
   EXAMPLES:
@@ -2869,6 +4221,12 @@ show_help() {
 
     # Preview what full setup would do
     sudo ./fta-toolbox.sh --dry-run --yes full
+
+    # Move Docker volumes onto a data disk (already mounted at /mnt/data)
+    sudo ./fta-toolbox.sh disk /mnt/data /var/lib/docker/volumes
+
+    # Format a blank disk and mount it at /data, no prompts
+    sudo ./fta-toolbox.sh --yes disk /dev/sdb /data xfs
 
 HELP_EOF
 }
@@ -2897,6 +4255,15 @@ main() {
             info|update|network|modern|nodejs|docker|portainer|watchtower|security|tuning|timezone|swap|dns|firewall|full)
                 module="$1"
                 shift
+                ;;
+            disk)
+                module="$1"
+                shift
+                # Optional positional args: SOURCE TARGET [FS]
+                while [[ $# -gt 0 && "$1" != -* ]]; do
+                    DISK_ARGS+=("$1")
+                    shift
+                done
                 ;;
             *)
                 msg_err "Unknown option: $1"
@@ -2945,6 +4312,7 @@ main() {
             swap)      module_swap ;;
             dns)       module_dns ;;
             firewall)  module_firewall ;;
+            disk)      module_disk ${DISK_ARGS[@]+"${DISK_ARGS[@]}"} ;;
             full)      module_full_setup ;;
         esac
     else

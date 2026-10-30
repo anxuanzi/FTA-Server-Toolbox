@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Single-file Bash toolbox (`fta-toolbox.sh`, ~2950 lines) for initializing, hardening, and maintaining Linux servers. Everything lives in one script — no external dependencies, no multi-file downloads.
+Single-file Bash toolbox (`fta-toolbox.sh`, ~4300 lines) for initializing, hardening, and maintaining Linux servers. Everything lives in one script — no external dependencies, no multi-file downloads.
 
 **Supported OS:** CentOS Stream 9/10, RHEL 9/10, Rocky 9/10, AlmaLinux 9/10, Fedora 40+, Ubuntu 22.04/24.04/26.04 LTS, Debian 12
 **Architectures:** x86_64, ARM64 (aarch64)
@@ -21,17 +21,17 @@ test/Dockerfile.*       # Test containers (centos9, centos10, fedora, ubuntu2404
 
 ## Script Architecture
 
-The script is organized into numbered sections (1–22). When adding or modifying modules, maintain this structure:
+The script is organized into numbered sections (1–23). When adding or modifying modules, maintain this structure:
 
 | Sections | Purpose |
 |----------|---------|
 | 1–4 | Constants, colors, cleanup, utility functions |
 | 5 | OS detection (`detect_os`) |
-| 6–18 | Feature modules (`module_*` functions; 18 is firewall, helpers prefixed `fw_`) |
-| 19 | Full auto setup wizard (`module_full_setup`) |
-| 20 | Self-update |
-| 21 | Menu system (`show_menu`, `handle_choice`, `menu_loop`) |
-| 22 | CLI argument parsing & `main()` |
+| 6–19 | Feature modules (`module_*` functions; 18 is firewall, helpers prefixed `fw_`; 19 is disk & mount manager, helpers prefixed `disk_`) |
+| 20 | Full auto setup wizard (`module_full_setup`) |
+| 21 | Self-update |
+| 22 | Menu system (`show_menu`, `handle_choice`, `menu_loop`) |
+| 23 | CLI argument parsing & `main()` |
 
 ## Module Conventions
 
@@ -52,7 +52,7 @@ Every module function follows a consistent pattern:
 
 When adding a new module, update ALL of these locations:
 
-1. **Module function** — new `# SECTION N:` block before the wizard (Section 19)
+1. **Module function** — new `# SECTION N:` block before the wizard (Section 20)
 2. **Renumber sections** — bump all subsequent section comment numbers
 3. **`show_menu()`** — add menu item line
 4. **`handle_choice()`** — add case branch
@@ -148,4 +148,4 @@ readonly TOOLBOX_VERSION="X.Y.Z"
 
 ## Current Modules (menu numbers)
 
-1=System Info, 2=Update, 3=Network Tools, 4=Modern CLI, 5=Node.js, 6=Docker, 7=Portainer, 8=Watchtower, 9=Security, 10=Performance, 11=Timezone, 12=Swap, 13=DNS, 14=Firewall, 88=Full Setup, 99=Self-Update, 0=Exit
+1=System Info, 2=Update, 3=Network Tools, 4=Modern CLI, 5=Node.js, 6=Docker, 7=Portainer, 8=Watchtower, 9=Security, 10=Performance, 11=Timezone, 12=Swap, 13=DNS, 14=Firewall, 15=Disk & Mount, 88=Full Setup, 99=Self-Update, 0=Exit
